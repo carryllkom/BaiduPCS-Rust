@@ -170,6 +170,7 @@ impl HistoryDbManager {
         let _ = conn.execute("ALTER TABLE task_history ADD COLUMN is_share_direct_download INTEGER", []);
         let _ = conn.execute("ALTER TABLE task_history ADD COLUMN temp_dir TEXT", []);
         let _ = conn.execute("ALTER TABLE task_history ADD COLUMN cleanup_status TEXT", []);
+        let _ = conn.execute("ALTER TABLE task_history ADD COLUMN share_root_path TEXT", []);
         // 🔥 多账号归属 — sqlite history 表也要支持 owner_uid，
         // 否则 row_to_task_metadata 永远返回 None，前端 DownloadsView/UploadsView 显示 UID:0
         let _ = conn.execute("ALTER TABLE task_history ADD COLUMN owner_uid INTEGER", []);
@@ -213,7 +214,7 @@ impl HistoryDbManager {
                 is_backup, backup_config_id,
                 transfer_task_id, download_task_ids,
                 file_list_json, is_share_direct_download,
-                temp_dir, cleanup_status, owner_uid
+                temp_dir, cleanup_status, share_root_path, owner_uid
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6,
                 ?7, ?8, ?9,
@@ -224,7 +225,7 @@ impl HistoryDbManager {
                 ?26, ?27,
                 ?28, ?29,
                 ?30, ?31,
-                ?32, ?33, ?34
+                ?32, ?33, ?34, ?35
             )
             "#,
             params![
@@ -261,6 +262,7 @@ impl HistoryDbManager {
                 metadata.is_share_direct_download.map(|b| if b { 1 } else { 0 }),
                 metadata.temp_dir,
                 metadata.cleanup_status.and_then(|s| serde_json::to_value(s).ok().and_then(|v| v.as_str().map(String::from))),
+                metadata.share_root_path,
                 // 🔥 多账号归属：Some(0) 也当作 None 写入（避免遗留 0 值被后续读成 Uid(0)）
                 metadata.owner_uid.filter(|u| *u != 0).map(|u| u as i64),
             ],
@@ -297,7 +299,7 @@ impl HistoryDbManager {
                     is_backup, backup_config_id,
                     transfer_task_id, download_task_ids,
                     file_list_json, is_share_direct_download,
-                    temp_dir, cleanup_status, owner_uid
+                    temp_dir, cleanup_status, share_root_path, owner_uid
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6,
                     ?7, ?8, ?9,
@@ -308,7 +310,7 @@ impl HistoryDbManager {
                     ?26, ?27,
                     ?28, ?29,
                     ?30, ?31,
-                    ?32, ?33, ?34
+                    ?32, ?33, ?34, ?35
                 )
                 "#,
             )?;
@@ -359,6 +361,7 @@ impl HistoryDbManager {
                     metadata.is_share_direct_download.map(|b| if b { 1 } else { 0 }),
                     metadata.temp_dir,
                     metadata.cleanup_status.and_then(|s| serde_json::to_value(s).ok().and_then(|v| v.as_str().map(String::from))),
+                    metadata.share_root_path,
                     // 🔥 多账号归属：Some(0) 也当作 None 写入
                     metadata.owner_uid.filter(|u| *u != 0).map(|u| u as i64),
                 ])?;
@@ -389,7 +392,7 @@ impl HistoryDbManager {
                 group_id, group_root, relative_path,
                 is_backup, backup_config_id,
                 transfer_task_id, download_task_ids,
-                temp_dir, cleanup_status, owner_uid
+                temp_dir, cleanup_status, share_root_path, owner_uid
             FROM task_history
             ORDER BY completed_at DESC
             "#,
@@ -430,7 +433,8 @@ impl HistoryDbManager {
                 download_task_ids: row.get(30)?,
                 temp_dir: row.get(31)?,
                 cleanup_status: row.get(32)?,
-                owner_uid: row.get(33)?,
+                share_root_path: row.get(33)?,
+                owner_uid: row.get(34)?,
             })
         })?;
 
@@ -487,7 +491,7 @@ impl HistoryDbManager {
                     group_id, group_root, relative_path,
                     is_backup, backup_config_id,
                     transfer_task_id, download_task_ids,
-                    temp_dir, cleanup_status, owner_uid
+                    temp_dir, cleanup_status, share_root_path, owner_uid
                 FROM task_history
                 WHERE task_id = ?1
                 "#,
@@ -527,7 +531,8 @@ impl HistoryDbManager {
                         download_task_ids: row.get(30)?,
                         temp_dir: row.get(31)?,
                         cleanup_status: row.get(32)?,
-                        owner_uid: row.get(33)?,
+                        share_root_path: row.get(33)?,
+                        owner_uid: row.get(34)?,
                     })
                 },
             )
@@ -576,7 +581,7 @@ impl HistoryDbManager {
                 group_id, group_root, relative_path,
                 is_backup, backup_config_id,
                 transfer_task_id, download_task_ids,
-                temp_dir, cleanup_status, owner_uid
+                temp_dir, cleanup_status, share_root_path, owner_uid
             FROM task_history
             ORDER BY completed_at DESC
             LIMIT ?1 OFFSET ?2
@@ -618,7 +623,8 @@ impl HistoryDbManager {
                 download_task_ids: row.get(30)?,
                 temp_dir: row.get(31)?,
                 cleanup_status: row.get(32)?,
-                owner_uid: row.get(33)?,
+                share_root_path: row.get(33)?,
+                owner_uid: row.get(34)?,
             })
         })?;
 
@@ -677,7 +683,7 @@ impl HistoryDbManager {
                 group_id, group_root, relative_path,
                 is_backup, backup_config_id,
                 transfer_task_id, download_task_ids,
-                temp_dir, cleanup_status, owner_uid
+                temp_dir, cleanup_status, share_root_path, owner_uid
             FROM task_history
             WHERE task_type = ?1 AND status = ?2
             ORDER BY completed_at DESC
@@ -720,7 +726,8 @@ impl HistoryDbManager {
                 download_task_ids: row.get(30)?,
                 temp_dir: row.get(31)?,
                 cleanup_status: row.get(32)?,
-                owner_uid: row.get(33)?,
+                share_root_path: row.get(33)?,
+                owner_uid: row.get(34)?,
             })
         })?;
 
@@ -783,7 +790,7 @@ impl HistoryDbManager {
                 group_id, group_root, relative_path,
                 is_backup, backup_config_id,
                 transfer_task_id, download_task_ids,
-                temp_dir, cleanup_status, owner_uid
+                temp_dir, cleanup_status, share_root_path, owner_uid
             FROM task_history
             WHERE task_type = ?1 AND status = ?2 {}
             ORDER BY completed_at DESC
@@ -828,7 +835,8 @@ impl HistoryDbManager {
                 download_task_ids: row.get(30)?,
                 temp_dir: row.get(31)?,
                 cleanup_status: row.get(32)?,
-                owner_uid: row.get(33)?,
+                share_root_path: row.get(33)?,
+                owner_uid: row.get(34)?,
             })
         })?;
 
@@ -1421,6 +1429,8 @@ impl HistoryDbManager {
             is_share_direct_download: row.is_share_direct_download.map(|v| v != 0),
             temp_dir: row.temp_dir,
             cleanup_status: row.cleanup_status.and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok()),
+            // SQLite 历史镜像现已持久化分享根路径，恢复时与 WAL `.meta` 等价
+            share_root_path: row.share_root_path,
             group_id: row.group_id,
             group_root: row.group_root,
             relative_path: row.relative_path,
@@ -1523,6 +1533,7 @@ struct TaskHistoryRow {
     download_task_ids: Option<String>,
     temp_dir: Option<String>,
     cleanup_status: Option<String>,
+    share_root_path: Option<String>,
     /// 多账号归属 UID；NULL 行视作历史遗留
     owner_uid: Option<i64>,
 }

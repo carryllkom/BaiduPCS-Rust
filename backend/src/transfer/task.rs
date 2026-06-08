@@ -128,6 +128,14 @@ pub struct TransferTask {
     /// 应由恢复逻辑填充 `active_uid` 或进入账号丢失分支。
     #[serde(default)]
     pub owner_uid: crate::auth::types::Uid,
+
+    /// 分享根的绝对路径（来自 share/list?root=1 响应的 title 字段）
+    ///
+    /// 用于在转存/自动下载阶段稳定推导 share_root（剥掉分享者私有上层目录），
+    /// 避免从文件路径反推时的歧义。详见 `docs/share-root-fix.md`。
+    /// 老任务或异常响应可能为 None，此时由调用方退化到启发式推导。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_root_path: Option<String>,
 }
 
 impl TransferTask {
@@ -177,6 +185,7 @@ impl TransferTask {
             temp_dir: None,
             selected_fs_ids: None,
             selected_files: None,
+            share_root_path: None,
         }
     }
 
