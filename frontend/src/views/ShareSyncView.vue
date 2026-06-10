@@ -16,14 +16,26 @@
         <el-card shadow="hover" class="list-card">
           <template #header>
             <div class="card-header">
-              <span>订阅列表（{{ subscriptions.length }}）</span>
-              <el-button type="primary" size="small" :icon="Plus" @click="openCreate">新增</el-button>
+              <span>订阅列表（{{ displayedSubscriptions.length }}）</span>
+              <div class="card-header-actions">
+                <AccountFilter
+                  v-if="authStore.hasMultipleAccounts"
+                  v-model="ownerFilter"
+                  :counts="ownerFilterCounts"
+                  :total-count="subscriptions.length"
+                  size="small"
+                />
+                <el-button type="primary" size="small" :icon="Plus" @click="openCreate">新增</el-button>
+              </div>
             </div>
           </template>
-          <el-empty v-if="subscriptions.length === 0" description="还没有订阅" />
+          <el-empty
+            v-if="displayedSubscriptions.length === 0"
+            :description="ownerFilter === null ? '还没有订阅' : '当前账号下没有订阅'"
+          />
           <div v-else class="sub-list">
             <div
-              v-for="s in subscriptions"
+              v-for="s in displayedSubscriptions"
               :key="s.id"
               class="sub-item"
               :class="{ active: selected?.id === s.id }"
@@ -32,6 +44,7 @@
               <div class="sub-name">
                 <el-icon><Link /></el-icon>
   <span>{{ s.name }}</span>
+                <AccountBadge :owner-uid="s.owner_uid" size="small" />
                 <el-tag v-if="!s.enabled" size="small" type="info">已停用</el-tag>
               </div>
               <div class="sub-meta">
@@ -170,6 +183,12 @@
       @close="resetForm"
     >
     <el-form :model="form" label-width="100px" :rules="formRules" ref="formRef">
+        <el-form-item
+          v-if="dialogMode === 'create' && authStore.hasMultipleAccounts"
+          label="归属账号"
+        >
+          <AccountSelect v-model="createOwnerUid" :include-all="false" />
+        </el-form-item>
         <el-form-item label="名称" prop="name">
           <el-input v-model="form.name" placeholder="如：剧集合集同步" />
         </el-form-item>
@@ -403,9 +422,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox, type ElTree } from 'element-plus'
 import type { AxiosError } from 'axios'
+import { useAuthStore } from '@/stores/auth'
+import AccountFilter from '@/components/AccountFilter.vue'
+import AccountBadge from '@/components/AccountBadge.vue'
+import AccountSelect from '@/components/AccountSelect.vue'
 import {
   Plus, Edit, Delete, Refresh, ArrowRight, Link,
   FolderOpened, Document, VideoPause, VideoPlay,
@@ -432,6 +455,26 @@ import { getWebSocketClient, connectWebSocket } from '@/utils/websocket'
 const subscriptions = ref<ShareSubscription[]>([])
 const DEFAULT_LOCAL_TARGET_PATH = '/home/hyx/codespace/one-family/data'
 const selected = ref<ShareSubscription | null>(null)
+
+// 多账号：账号过滤（null=全部账号）+ 新建时归属账号
+const authStore = useAuthStore()
+const ownerFilter = ref<number | null>(null)
+const createOwnerUid = ref<number | null>(null)
+
+// 按账号过滤后的订阅列表（与 transfer/autobackup 一致：null 显示全部）
+const displayedSubscriptions = computed(() => {
+  if (ownerFilter.value === null) return subscriptions.value
+  return subscriptions.value.filter(s => s.owner_uid === ownerFilter.value)
+})
+
+// 各账号订阅数量（AccountFilter badge 展示）
+const ownerFilterCounts = computed(() => {
+  const map: Record<number, number> = {}
+  for (const s of subscriptions.value) {
+    if (typeof s.owner_uid === 'number') map[s.owner_uid] = (map[s.owner_uid] || 0) + 1
+  }
+  return map
+})
 const runs = ref<RunRecord[]>([])
 const currentRun = ref<RunDetail | null>(null)
 const dialogVisible = ref(false)
@@ -588,6 +631,8 @@ function openCreate() {
   form.value = defaultForm()
   scheduledTime.value = '03:00'
   dialogMode.value = 'create'
+  // 新建归属账号默认：当前过滤账号 → 当前活跃账号
+  createOwnerUid.value = ownerFilter.value ?? authStore.activeUid
   dialogVisible.value = true
 }
 
@@ -655,6 +700,8 @@ async function saveForm() {
         conflict_strategy: form.value.conflict_strategy,
         delete_missing: form.value.delete_missing,
         poll_config: form.value.poll_config,
+        // 多账号：显式归属账号（缺省由后端回退到当前活跃账号）
+        owner_uid: createOwnerUid.value ?? undefined,
       }
       await createSubscription(req)
       ElMessage.success('已创建订阅')

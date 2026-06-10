@@ -224,6 +224,7 @@ impl ShareSyncManager {
         self.publisher.publish(ShareSyncEvent::SubscriptionCreated {
             subscription_id: sub.id.clone(),
             name: sub.name.clone(),
+            owner_uid: sub.owner_uid,
         });
         info!("ShareSyncManager: 创建订阅 id={}", sub.id);
         Ok(sub)
@@ -253,6 +254,7 @@ impl ShareSyncManager {
         }
         self.publisher.publish(ShareSyncEvent::SubscriptionUpdated {
             subscription_id: id.into(),
+            owner_uid: new_sub.owner_uid,
         });
         Ok(new_sub)
     }
@@ -275,19 +277,22 @@ impl ShareSyncManager {
         self.publisher.publish(ShareSyncEvent::StatusChanged {
             subscription_id: id.into(),
             enabled,
+            owner_uid: sub_clone.owner_uid,
         });
         Ok(())
     }
 
     pub fn delete_subscription(self: &Arc<Self>, id: &str) -> Result<(), ShareSyncError> {
-        if self.subscriptions.remove(id).is_none() {
-            return Err(ShareSyncError::SubscriptionNotFound(id.into()));
-        }
+        let removed = match self.subscriptions.remove(id) {
+            Some((_, sub)) => sub,
+            None => return Err(ShareSyncError::SubscriptionNotFound(id.into())),
+        };
         self.stop_scheduler_for(id);
         // DB 删除（级联清理 snapshots/runs）
         let _ = self.persistence.delete_subscription(id);
         self.publisher.publish(ShareSyncEvent::SubscriptionDeleted {
             subscription_id: id.into(),
+            owner_uid: removed.owner_uid,
         });
         Ok(())
     }
@@ -370,6 +375,7 @@ impl ShareSyncManager {
         self.publisher.publish(ShareSyncEvent::RunStarted {
             run_id: run_id.clone(),
             subscription_id: id.into(),
+            owner_uid,
         });
 
         // 1) 抓取
@@ -385,12 +391,12 @@ impl ShareSyncManager {
             Ok(collector) => match collector.collect().await {
                 Ok(t) => t,
                 Err(e) => {
-                    self.fail_run(&run_id, id, &format!("抓取失败: {}", e));
+                    self.fail_run(&run_id, id, owner_uid, &format!("抓取失败: {}", e));
                     return Err(e);
                 }
             },
             Err(e) => {
-                self.fail_run(&run_id, id, &format!("抓取初始化失败: {}", e));
+                self.fail_run(&run_id, id, owner_uid, &format!("抓取初始化失败: {}", e));
                 return Err(e);
             }
         };
@@ -407,7 +413,7 @@ impl ShareSyncManager {
         if let Err(e) =
             augment_diff_with_local_target_state(&sub, prev.as_ref(), &curr_snapshot, &mut diff)
         {
-            self.fail_run(&run_id, id, &format!("本地目标校验失败: {}", e));
+            self.fail_run(&run_id, id, owner_uid, &format!("本地目标校验失败: {}", e));
             return Err(e);
         }
 
@@ -417,6 +423,7 @@ impl ShareSyncManager {
             added: diff.added.iter().filter(|i| !i.is_dir).count(),
             modified: diff.modified.iter().filter(|i| !i.new.is_dir).count(),
             removed: diff.removed.iter().filter(|i| !i.is_dir).count(),
+            owner_uid,
         });
 
         // 4) 执行
@@ -456,6 +463,7 @@ impl ShareSyncManager {
                     modified: outcome.diff_summary.modified,
                     removed: outcome.diff_summary.removed,
                     failed: outcome.diff_summary.failed,
+                    owner_uid,
                 });
             }
             crate::share_sync::types::RunStatus::Failed => {
@@ -466,6 +474,7 @@ impl ShareSyncManager {
                         .error
                         .clone()
                         .unwrap_or_else(|| "unknown error".into()),
+                    owner_uid,
                     // v1: 目前 outcome.error 仍以原始字符串承载，reason 由 executor
                     // 在 quota/local_disk_full 早停时显式设置。
                     // 此分支对应 manager 自身检查到的失败（如 start_run 失败），
@@ -478,7 +487,7 @@ impl ShareSyncManager {
         Ok(outcome)
     }
 
-    fn fail_run(&self, run_id: &str, sub_id: &str, err: &str) {
+    fn fail_run(&self, run_id: &str, sub_id: &str, owner_uid: u64, err: &str) {
         use crate::share_sync::types::{DiffSummary, RunStatus};
         let now = chrono::Utc::now().timestamp();
         let _ = self.persistence.start_run(run_id, sub_id, now);
@@ -493,6 +502,7 @@ impl ShareSyncManager {
             run_id: run_id.into(),
             subscription_id: sub_id.into(),
             error: err.into(),
+            owner_uid,
             reason: None,
         });
     }

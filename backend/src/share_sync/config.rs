@@ -332,6 +332,10 @@ pub struct CreateShareSubscriptionRequest {
     pub delete_missing: Option<bool>,
     #[serde(default)]
     pub poll_config: Option<PollConfig>,
+    /// 显式指定订阅归属账号（多账号场景）。
+    /// 缺省回退到当前活跃账号；兼容前端发的 `owner_uid` 字段名。
+    #[serde(default, alias = "owner_uid")]
+    pub uid: Option<u64>,
 }
 
 impl CreateShareSubscriptionRequest {
@@ -637,8 +641,11 @@ mod tests {
                 schedule_hour: Some(3),
                 schedule_minute: Some(30),
             }),
+            uid: Some(42),
         };
         let sub = req.into_subscription();
+        // into_subscription 不消费 uid（归属由 handler 显式设置），默认仍为 0
+        assert_eq!(sub.owner_uid, 0);
         assert_eq!(sub.password.as_deref(), Some("1234"));
         assert!(sub.delete_missing);
         assert_eq!(sub.conflict_strategy, ConflictStrategy::Skip);
