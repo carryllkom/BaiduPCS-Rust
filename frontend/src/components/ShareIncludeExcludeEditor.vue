@@ -213,7 +213,7 @@ function removeExclude(i: number) {
 }
 
 function openTreePicker() {
-  if (!props.shareUrl) {
+  if (!props.shareUrl || !props.shareUrl.trim()) {
     ElMessage.warning('请先填写分享链接')
     return
   }
@@ -226,7 +226,7 @@ async function loadTree() {
   treeError.value = ''
   try {
     const resp = await previewTree(
-      props.shareUrl,
+      props.shareUrl.trim(),
       props.password || null,
       treeDepth.value
     )
@@ -249,22 +249,25 @@ async function loadTree() {
 }
 
 function confirmTreePicker() {
+  // 只取“完全勾选”的节点。半选(getHalfCheckedNodes)是因子节点部分选中而处于
+  // 中间态的祖先目录——若把它们也写进 include_paths，后端按“include_path = 整棵
+  // 子树（前缀匹配）”的语义会把未勾选的兄弟节点一并纳入，造成过度同步
+  // （例：只勾 /A/B/1.txt 却把整个 /A 都同步）。祖先目录用于下钻遍历的需求，
+  // 后端已通过 build_include_index 自动补齐，无需前端再加。
   const checked = treeRef.value?.getCheckedNodes?.(false, false) || []
-  const halfChecked = treeRef.value?.getHalfCheckedNodes?.() || []
-  const all = [...checked, ...halfChecked]
-  // 按照树节点路径回填，先标准化再去重
-  const nextInclude: string[] = []
-  const uniq = new Set<string>()
-  all
-    .map((n) => (n as unknown as TreeNode).path)
-    .map((p: string) => normalizePath(p))
+  const paths = checked
+    .map((n) => normalizePath((n as unknown as TreeNode).path))
     .filter((p: string) => p.length > 0)
-    .forEach((p: string) => {
-      if (!uniq.has(p)) {
-        uniq.add(p)
-        nextInclude.push(p)
-      }
-    })
+  // 去重 + 裁剪被已勾选祖先覆盖的冗余后代（勾选目录即代表整棵子树）
+  const nextInclude: string[] = []
+  const seen = new Set<string>()
+  for (const p of paths) {
+    if (seen.has(p)) continue
+    seen.add(p)
+    const coveredByAncestor = paths.some((a) => a !== p && p.startsWith(`${a}/`))
+    if (coveredByAncestor) continue
+    nextInclude.push(p)
+  }
   emit('update:includePaths', nextInclude)
   treePickerVisible.value = false
 }
