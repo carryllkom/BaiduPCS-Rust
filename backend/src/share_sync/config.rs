@@ -114,6 +114,9 @@ impl PollConfig {
 pub struct ShareSubscription {
     /// 订阅 ID（UUID）
     pub id: String,
+    /// 所属账号 uid（多账号隔离）。0 表示历史/未归属数据，由上层在创建/导入时赋值。
+    #[serde(default)]
+    pub owner_uid: u64,
     /// 用户可见名称
     pub name: String,
     /// 分享链接（可含 pwd=xxxx）
@@ -153,6 +156,7 @@ impl ShareSubscription {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4().to_string(),
+            owner_uid: 0,
             name,
             share_url,
             password: None,

@@ -13,6 +13,7 @@ pub mod events;
 pub mod executor;
 pub mod manager;
 pub mod persistence;
+pub mod resolver;
 pub mod scheduler;
 pub mod snapshot;
 pub mod types;
@@ -30,6 +31,7 @@ pub use persistence::{
     normalize_pagination, RunItemRecord, RunRecord, ShareSyncPersistence, DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
 };
+pub use resolver::{ShareSyncAccountResolver, StaticAccountResolver};
 pub use snapshot::{
     infer_share_root, normalize_share_path, CapturedShare, ShareSnapshot, ShareSnapshotItem,
     SnapshotCollector,

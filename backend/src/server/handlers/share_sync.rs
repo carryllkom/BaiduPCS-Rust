@@ -90,11 +90,26 @@ fn map_share_err(e: ShareSyncError) -> ApiError {
     }
 }
 
-fn ensure_subscription_exists(manager: &Arc<ShareSyncManager>, id: &str) -> ApiResult<()> {
-    if manager.get_subscription(id).is_none() {
-        return Err(err_not_found("订阅不存在"));
+/// 取当前活跃账号 uid（多账号隔离的访问主体）。未登录 → 401。
+async fn require_active_uid(state: &AppState) -> ApiResult<u64> {
+    match *state.active_uid.read().await {
+        Some(uid) => Ok(uid.raw()),
+        None => Err(ApiError::Unauthorized(
+            "未登录，请先登录百度账号".to_string(),
+        )),
     }
-    Ok(())
+}
+
+/// 取归属当前账号的订阅；不存在或归属其它账号都返回 404（不泄露跨账号存在性）。
+fn require_owned_subscription(
+    manager: &Arc<ShareSyncManager>,
+    id: &str,
+    owner_uid: u64,
+) -> ApiResult<ShareSubscription> {
+    match manager.get_subscription(id) {
+        Some(s) if s.owner_uid == owner_uid => Ok(s),
+        _ => Err(err_not_found("订阅不存在")),
+    }
 }
 
 // =====================================================
@@ -105,8 +120,9 @@ fn ensure_subscription_exists(manager: &Arc<ShareSyncManager>, id: &str) -> ApiR
 pub async fn list_subscriptions(
     State(state): State<AppState>,
 ) -> ApiResult<Json<ApiResponse<Vec<ShareSubscription>>>> {
+    let uid = require_active_uid(&state).await?;
     let m = get_manager(&state).await?;
-    let list = m.list_subscriptions();
+    let list = m.list_for_owner(uid);
     Ok(Json(ApiResponse::success(list)))
 }
 
@@ -115,11 +131,10 @@ pub async fn get_subscription(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<ShareSubscription>>> {
+    let uid = require_active_uid(&state).await?;
     let m = get_manager(&state).await?;
-    match m.get_subscription(&id) {
-        Some(s) => Ok(Json(ApiResponse::success(s))),
-        None => Err(err_not_found("订阅不存在")),
-    }
+    let s = require_owned_subscription(&m, &id, uid)?;
+    Ok(Json(ApiResponse::success(s)))
 }
 
 /// POST /api/v1/share-sync/subscriptions
@@ -127,8 +142,11 @@ pub async fn create_subscription(
     State(state): State<AppState>,
     Json(req): Json<CreateShareSubscriptionRequest>,
 ) -> ApiResult<Json<ApiResponse<ShareSubscription>>> {
+    let uid = require_active_uid(&state).await?;
     let m = get_manager(&state).await?;
-    let sub = req.into_subscription();
+    let mut sub = req.into_subscription();
+    // 多账号隔离：新建订阅归属当前活跃账号
+    sub.owner_uid = uid;
     match m.create_subscription(sub) {
         Ok(s) => Ok(Json(ApiResponse::success(s))),
         Err(e) => Err(map_share_err(e)),
@@ -141,10 +159,9 @@ pub async fn update_subscription(
     Path(id): Path<String>,
     Json(req): Json<UpdateShareSubscriptionRequest>,
 ) -> ApiResult<Json<ApiResponse<ShareSubscription>>> {
+    let uid = require_active_uid(&state).await?;
     let m = get_manager(&state).await?;
-    let existing = m
-        .get_subscription(&id)
-        .ok_or_else(|| err_not_found("订阅不存在"))?;
+    let existing = require_owned_subscription(&m, &id, uid)?;
     let mut new_sub = existing.clone();
     if let Some(v) = req.name {
         new_sub.name = v;
@@ -187,7 +204,9 @@ pub async fn delete_subscription(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
+    let uid = require_active_uid(&state).await?;
     let m = get_manager(&state).await?;
+    require_owned_subscription(&m, &id, uid)?;
     m.delete_subscription(&id).map_err(map_share_err)?;
     Ok(Json(ApiResponse::success(
         serde_json::json!({"deleted": id}),
@@ -199,7 +218,9 @@ pub async fn enable_subscription(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
+    let uid = require_active_uid(&state).await?;
     let m = get_manager(&state).await?;
+    require_owned_subscription(&m, &id, uid)?;
     m.set_enabled(&id, true).map_err(map_share_err)?;
     Ok(Json(ApiResponse::success(
         serde_json::json!({"enabled": true}),
@@ -211,7 +232,9 @@ pub async fn disable_subscription(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
+    let uid = require_active_uid(&state).await?;
     let m = get_manager(&state).await?;
+    require_owned_subscription(&m, &id, uid)?;
     m.set_enabled(&id, false).map_err(map_share_err)?;
     Ok(Json(ApiResponse::success(
         serde_json::json!({"enabled": false}),
@@ -223,7 +246,9 @@ pub async fn trigger_subscription(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
+    let uid = require_active_uid(&state).await?;
     let m = get_manager(&state).await?;
+    require_owned_subscription(&m, &id, uid)?;
     m.trigger_one(&id).map_err(map_share_err)?;
     Ok(Json(ApiResponse::success(
         serde_json::json!({"subscription_id": id, "triggered": true}),
@@ -242,8 +267,9 @@ pub async fn list_runs(
     Path(id): Path<String>,
     Query(q): Query<RunsQuery>,
 ) -> ApiResult<Json<ApiResponse<Vec<RunRecord>>>> {
+    let uid = require_active_uid(&state).await?;
     let m = get_manager(&state).await?;
-    ensure_subscription_exists(&m, &id)?;
+    require_owned_subscription(&m, &id, uid)?;
     let (page, ps) = normalize_pagination(q.page, q.page_size);
     let list = m
         .persistence()
@@ -257,7 +283,15 @@ pub async fn get_run(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<RunDetailDto>>> {
+    let uid = require_active_uid(&state).await?;
     let m = get_manager(&state).await?;
+    // 多账号隔离：先校验该 run 所属订阅归属当前账号
+    let sub_id = m
+        .persistence()
+        .subscription_id_for_run(&id)
+        .map_err(map_share_err)?
+        .ok_or_else(|| err_not_found("运行记录不存在"))?;
+    require_owned_subscription(&m, &sub_id, uid)?;
     let rec = m
         .persistence()
         .get_run(&id)
@@ -279,8 +313,9 @@ pub async fn latest_snapshot(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
+    let uid = require_active_uid(&state).await?;
     let m = get_manager(&state).await?;
-    ensure_subscription_exists(&m, &id)?;
+    require_owned_subscription(&m, &id, uid)?;
     match m
         .persistence()
         .latest_snapshot(&id)

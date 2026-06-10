@@ -70,6 +70,7 @@ impl ShareSyncPersistence {
             r#"
             CREATE TABLE IF NOT EXISTS share_subscriptions (
                 id TEXT PRIMARY KEY,
+                owner_uid INTEGER NOT NULL DEFAULT 0,
                 name TEXT NOT NULL,
                 share_url TEXT NOT NULL,
                 password TEXT,
@@ -80,6 +81,8 @@ impl ShareSyncPersistence {
             );
             CREATE INDEX IF NOT EXISTS idx_share_subs_enabled
               ON share_subscriptions(enabled);
+            CREATE INDEX IF NOT EXISTS idx_share_subs_owner
+              ON share_subscriptions(owner_uid);
 
             CREATE TABLE IF NOT EXISTS share_snapshots (
                 id TEXT PRIMARY KEY,
@@ -164,6 +167,8 @@ impl ShareSyncPersistence {
             "ALTER TABLE share_sync_runs ADD COLUMN unchanged_count INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE share_sync_runs ADD COLUMN skipped_count INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE share_sync_runs ADD COLUMN overwritten_count INTEGER NOT NULL DEFAULT 0",
+            // 多账号隔离：老库（含早期把 share_subscriptions 建在独立库的版本）补 owner_uid 列
+            "ALTER TABLE share_subscriptions ADD COLUMN owner_uid INTEGER NOT NULL DEFAULT 0",
         ] {
             if let Err(e) = conn.execute(ddl, []) {
                 let msg = e.to_string();
@@ -189,9 +194,10 @@ impl ShareSyncPersistence {
         let updated = sub.updated_at.timestamp();
         conn.execute(
             r#"INSERT INTO share_subscriptions
-               (id, name, share_url, password, config_json, enabled, created_at, updated_at)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+               (id, owner_uid, name, share_url, password, config_json, enabled, created_at, updated_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                ON CONFLICT(id) DO UPDATE SET
+                 owner_uid=excluded.owner_uid,
                  name=excluded.name,
                  share_url=excluded.share_url,
                  password=excluded.password,
@@ -200,6 +206,7 @@ impl ShareSyncPersistence {
                  updated_at=excluded.updated_at"#,
             params![
                 sub.id,
+                sub.owner_uid,
                 sub.name,
                 sub.share_url,
                 password,
@@ -234,6 +241,31 @@ impl ShareSyncPersistence {
         let mut stmt =
             conn.prepare("SELECT config_json FROM share_subscriptions ORDER BY created_at DESC")?;
         let rows = stmt.query_map([], |row| {
+            let s: String = row.get(0)?;
+            Ok(s)
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let s: String = r?;
+            match serde_json::from_str::<ShareSubscription>(&s) {
+                Ok(sub) => out.push(sub),
+                Err(e) => warn!("反序列化订阅失败: {}", e),
+            }
+        }
+        Ok(out)
+    }
+
+    /// 列出归属指定账号(owner_uid)的订阅（多账号隔离，按 created_at DESC）
+    pub fn list_subscriptions_for_owner(
+        &self,
+        owner_uid: u64,
+    ) -> Result<Vec<ShareSubscription>, ShareSyncError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT config_json FROM share_subscriptions \
+             WHERE owner_uid = ?1 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![owner_uid], |row| {
             let s: String = row.get(0)?;
             Ok(s)
         })?;
@@ -587,6 +619,22 @@ impl ShareSyncPersistence {
         Ok(rec)
     }
 
+    /// 取某 run 所属的 subscription_id（多账号隔离：用于校验访问者归属）
+    pub fn subscription_id_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<String>, ShareSyncError> {
+        let conn = self.conn.lock().unwrap();
+        let sid: Option<String> = conn
+            .query_row(
+                "SELECT subscription_id FROM share_sync_runs WHERE id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(sid)
+    }
+
     /// 列出 run 的所有 run_items
     pub fn list_run_items(&self, run_id: &str) -> Result<Vec<RunItemRecord>, ShareSyncError> {
         let conn = self.conn.lock().unwrap();
@@ -721,6 +769,60 @@ mod tests {
         mgr.upsert_subscription(&b).unwrap();
         let list = mgr.list_subscriptions().unwrap();
         assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn test_owner_uid_roundtrip() {
+        let (_dir, mgr) = fresh();
+        let mut s = sub("a");
+        s.owner_uid = 42;
+        mgr.upsert_subscription(&s).unwrap();
+        let got = mgr.get_subscription(&s.id).unwrap().unwrap();
+        assert_eq!(got.owner_uid, 42);
+    }
+
+    #[test]
+    fn test_list_subscriptions_for_owner_isolates_accounts() {
+        let (_dir, mgr) = fresh();
+        // 账号 1 两条，账号 2 一条
+        let mut a1 = sub("a1");
+        a1.owner_uid = 1;
+        a1.touch();
+        let mut a2 = sub("a2");
+        a2.owner_uid = 1;
+        a2.touch();
+        let mut b1 = sub("b1");
+        b1.owner_uid = 2;
+        b1.touch();
+        mgr.upsert_subscription(&a1).unwrap();
+        mgr.upsert_subscription(&a2).unwrap();
+        mgr.upsert_subscription(&b1).unwrap();
+
+        let owner1 = mgr.list_subscriptions_for_owner(1).unwrap();
+        assert_eq!(owner1.len(), 2);
+        assert!(owner1.iter().all(|s| s.owner_uid == 1));
+
+        let owner2 = mgr.list_subscriptions_for_owner(2).unwrap();
+        assert_eq!(owner2.len(), 1);
+        assert_eq!(owner2[0].owner_uid, 2);
+
+        // 不存在的账号看不到任何订阅
+        assert_eq!(mgr.list_subscriptions_for_owner(999).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_subscription_id_for_run_maps_to_owning_subscription() {
+        let (_dir, mgr) = fresh();
+        let s = sub("a");
+        mgr.upsert_subscription(&s).unwrap();
+        let run_id = "run-1";
+        mgr.start_run(run_id, &s.id, 1000).unwrap();
+
+        let mapped = mgr.subscription_id_for_run(run_id).unwrap();
+        assert_eq!(mapped.as_deref(), Some(s.id.as_str()));
+
+        // 不存在的 run → None（handler 据此返回 404）
+        assert!(mgr.subscription_id_for_run("no-such-run").unwrap().is_none());
     }
 
     #[test]
