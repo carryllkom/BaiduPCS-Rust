@@ -280,9 +280,17 @@
             <el-input
               v-else
               v-model="(t as LocalTarget).local_path"
-              placeholder="本地绝对路径，如 /data/share-sync"
+              placeholder="本地绝对路径，如 /data/share-sync 或 D:\share-sync"
               style="margin-left: 8px; flex: 1"
             />
+            <el-button
+              v-if="t.kind === 'local'"
+              :icon="FolderOpened"
+              @click="openDirPicker(i)"
+              style="margin-left: 4px"
+            >
+              选择
+            </el-button>
             <el-button :icon="Delete" link type="danger" @click="form.targets.splice(i, 1)" style="margin-left: 4px" />
           </div>
           <el-button :icon="Plus" link @click="form.targets.push(createDefaultTarget())">
@@ -418,6 +426,18 @@
         </el-table>
       </div>
     </el-dialog>
+
+    <!-- 本地目录选择（对齐转存：FilePickerModal 选目录） -->
+    <FilePickerModal
+        v-model="dirPickerVisible"
+        mode="download"
+        select-type="directory"
+        title="选择本地目录"
+        :initial-path="dirPickerInitialPath"
+        :default-download-dir="dirPickerDefaultDir"
+        @confirm-download="handleDirConfirm"
+        @use-default="handleDirUseDefault"
+    />
   </div>
 </template>
 
@@ -429,6 +449,8 @@ import { useAuthStore } from '@/stores/auth'
 import AccountFilter from '@/components/AccountFilter.vue'
 import AccountBadge from '@/components/AccountBadge.vue'
 import AccountSelect from '@/components/AccountSelect.vue'
+import { FilePickerModal } from '@/components/FilePicker'
+import { getConfig, updateRecentDirDebounced, setDefaultDownloadDir, type DownloadConfig } from '@/api/config'
 import {
   Plus, Edit, Delete, Refresh, ArrowRight, Link,
   FolderOpened, Document, VideoPause, VideoPlay,
@@ -476,6 +498,12 @@ const ownerFilterCounts = computed(() => {
 })
 const runs = ref<RunRecord[]>([])
 const currentRun = ref<RunDetail | null>(null)
+
+// 本地目录选择（与转存一致：FilePickerModal 选目录 + 最近目录联动）
+const downloadConfig = ref<DownloadConfig | null>(null)
+const dirPickerVisible = ref(false)
+const dirPickerTargetIndex = ref<number>(-1)
+
 const dialogVisible = ref(false)
 const dialogMode = ref<'create' | 'edit'>('create')
 const runDialogVisible = ref(false)
@@ -751,13 +779,11 @@ function validateForm(): boolean {
         return false
       }
     } else if (t.kind === 'local') {
+      // 仅校验非空；绝对路径/目录存在/可写交给后端 validate_local_path()
+      // （按平台用 Path::is_absolute() 判断，避免前端写死 Linux 的 / 前缀误伤 Windows 的 D:\）
       const lp = String(t.local_path || '').trim()
       if (!lp) {
         ElMessage.error(`目标 #${i + 1}：本地路径不能为空`)
-        return false
-      }
-      if (!lp.startsWith('/')) {
-        ElMessage.error(`目标 #${i + 1}：本地路径必须是绝对路径`)
         return false
       }
     } else {
@@ -811,14 +837,6 @@ function normalizeRemotePath(v: string): string {
   return normalizePath(v) || '/'
 }
 
-function normalizeLocalPath(v: string): string {
-  const s = v.trim().replace(/\/+/g, '/')
-  if (!s) return ''
-  const prefixed = s.startsWith('/') ? s : `/${s}`
-  if (prefixed.length === 1) return '/'
-  return prefixed.endsWith('/') ? prefixed.slice(0, -1) : prefixed
-}
-
 function buildSanitizedPayload() {
   const includeSet = new Set<string>()
   for (const p of form.value.include_paths) {
@@ -852,7 +870,8 @@ function buildSanitizedPayload() {
         ...(t.conflict_strategy ? { conflict_strategy: t.conflict_strategy } : {}),
       })
     } else if (t.kind === 'local') {
-      const local = normalizeLocalPath(String(t.local_path || ''))
+      // 本地路径只做 trim，不做 / 归一化（保留 Windows 的 D:\ 等平台路径原样交后端）
+      const local = String(t.local_path || '').trim()
       nextTargets.push({
         kind: 'local',
         local_path: local,
@@ -927,10 +946,57 @@ function onTargetKindChange(t: SyncTarget) {
     delete (t as unknown as Record<string, unknown>).local_path
   }
   if (t.kind === 'local') {
-    t.local_path = normalizeLocalPath(String(t.local_path || ''))
+    t.local_path = String(t.local_path || '').trim()
     delete (t as unknown as Record<string, unknown>).save_fs_id
     delete (t as unknown as Record<string, unknown>).remote_path
   }
+}
+
+// ==================== 本地目录选择（对齐转存） ====================
+
+const dirPickerInitialPath = computed(
+  () => downloadConfig.value?.recent_directory
+    || downloadConfig.value?.default_directory
+    || downloadConfig.value?.download_dir
+    || '',
+)
+const dirPickerDefaultDir = computed(
+  () => downloadConfig.value?.default_directory || downloadConfig.value?.download_dir || '',
+)
+
+function openDirPicker(index: number) {
+  dirPickerTargetIndex.value = index
+  dirPickerVisible.value = true
+}
+
+function applyPickedDir(path: string) {
+  const idx = dirPickerTargetIndex.value
+  const t = form.value.targets[idx] as LocalTarget | undefined
+  if (t && t.kind === 'local') {
+    t.local_path = String(path || '').trim()
+  }
+  dirPickerTargetIndex.value = -1
+}
+
+// FilePickerModal mode="download"：选定目录（path 原样，不做归一化）
+function handleDirConfirm(payload: { path: string; setAsDefault: boolean }) {
+  const { path, setAsDefault } = payload
+  dirPickerVisible.value = false
+  applyPickedDir(path)
+  if (setAsDefault) {
+    setDefaultDownloadDir({ path })
+      .then(() => { if (downloadConfig.value) downloadConfig.value.default_directory = path })
+      .catch(() => { /* 设默认失败不阻断填写 */ })
+  }
+  // 与转存一致：联动最近下载目录
+  updateRecentDirDebounced({ dir_type: 'download', path })
+  if (downloadConfig.value) downloadConfig.value.recent_directory = path
+}
+
+function handleDirUseDefault() {
+  dirPickerVisible.value = false
+  const target = dirPickerDefaultDir.value
+  if (target) applyPickedDir(target)
 }
 
 // ==================== 路径编辑 / 树选择 ====================
@@ -1114,6 +1180,14 @@ onMounted(async () => {
   await refresh()
   if (subscriptions.value.length > 0 && !selected.value) {
     await select(subscriptions.value[0])
+  }
+
+  // 加载下载目录配置（本地目标选目录时用作初始/默认目录，与转存一致）
+  try {
+    const appConfig = await getConfig()
+    downloadConfig.value = appConfig.download
+  } catch {
+    // 配置加载失败不阻断页面；选目录时回退到根目录
   }
 
   // 订阅 WebSocket
