@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::server::error::ApiError;
+use crate::server::extractors::{ensure_client_available, resolve_owner_uid_for_create};
 use crate::server::AppState;
 use crate::share_sync::{
     infer_share_root, normalize_pagination, normalize_share_path, CreateShareSubscriptionRequest,
@@ -90,19 +91,6 @@ fn map_share_err(e: ShareSyncError) -> ApiError {
     }
 }
 
-/// 取当前活跃账号 uid。未登录 → 401。
-///
-/// 仅用于"新建订阅"时确定归属账号（与 autobackup/transfer 一致：缺省归属当前账号）。
-/// 读取 / 操作类接口不再强制活跃账号，跨账号可见由前端账号过滤器 + 账号徽章处理。
-async fn require_active_uid(state: &AppState) -> ApiResult<u64> {
-    match *state.active_uid.read().await {
-        Some(uid) => Ok(uid.raw()),
-        None => Err(ApiError::Unauthorized(
-            "未登录，请先登录百度账号".to_string(),
-        )),
-    }
-}
-
 /// 按 id 取订阅；不存在 → 404。
 ///
 /// 多账号策略对齐其它页面（autobackup/transfer/download）：后端不做按账号的访问拦截，
@@ -157,18 +145,18 @@ pub async fn get_subscription(
 
 /// POST /api/v1/share-sync/subscriptions
 ///
-/// 归属账号：优先用请求里的 `uid`/`owner_uid`，缺省回退到当前活跃账号（与 autobackup 一致）。
+/// 归属账号：优先用请求里的 `uid`/`owner_uid`，缺省回退到当前活跃账号（与 download/autobackup 一致）。
+/// 创建前校验该账号确实已登录（`client_pool` 中存在），避免存下无法同步的孤儿订阅
+/// （传错 uid 时直接 400 `account_not_available`，而不是等到 resolver 执行阶段才失败）。
 pub async fn create_subscription(
     State(state): State<AppState>,
     Json(req): Json<CreateShareSubscriptionRequest>,
 ) -> ApiResult<Json<ApiResponse<ShareSubscription>>> {
-    let owner_uid = match req.uid {
-        Some(u) => u,
-        None => require_active_uid(&state).await?,
-    };
+    let owner_uid = resolve_owner_uid_for_create(&state, req.uid).await?;
+    ensure_client_available(&state, owner_uid).await?;
     let m = get_manager(&state).await?;
     let mut sub = req.into_subscription();
-    sub.owner_uid = owner_uid;
+    sub.owner_uid = owner_uid.raw();
     match m.create_subscription(sub) {
         Ok(s) => Ok(Json(ApiResponse::success(s))),
         Err(e) => Err(map_share_err(e)),
