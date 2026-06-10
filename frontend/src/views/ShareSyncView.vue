@@ -280,7 +280,7 @@
             <el-input
               v-else
               v-model="(t as LocalTarget).local_path"
-              placeholder="本地路径"
+              placeholder="本地绝对路径，如 /data/share-sync"
               style="margin-left: 8px; flex: 1"
             />
             <el-button :icon="Delete" link type="danger" @click="form.targets.splice(i, 1)" style="margin-left: 4px" />
@@ -453,7 +453,6 @@ import {
 import { getWebSocketClient, connectWebSocket } from '@/utils/websocket'
 
 const subscriptions = ref<ShareSubscription[]>([])
-const DEFAULT_LOCAL_TARGET_PATH = '/home/hyx/codespace/one-family/data'
 const selected = ref<ShareSubscription | null>(null)
 
 // 多账号：账号过滤（null=全部账号）+ 新建时归属账号
@@ -508,7 +507,7 @@ watch(treeFilterText, (v) => {
 })
 
 function createDefaultTarget(): SyncTarget {
-  return { kind: 'local', local_path: DEFAULT_LOCAL_TARGET_PATH, conflict_strategy: null }
+  return { kind: 'local', local_path: '', conflict_strategy: null }
 }
 
 const defaultForm = (): {
@@ -928,7 +927,7 @@ function onTargetKindChange(t: SyncTarget) {
     delete (t as unknown as Record<string, unknown>).local_path
   }
   if (t.kind === 'local') {
-    t.local_path = normalizeLocalPath(String(t.local_path || DEFAULT_LOCAL_TARGET_PATH))
+    t.local_path = normalizeLocalPath(String(t.local_path || ''))
     delete (t as unknown as Record<string, unknown>).save_fs_id
     delete (t as unknown as Record<string, unknown>).remote_path
   }
