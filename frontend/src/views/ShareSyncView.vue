@@ -615,6 +615,15 @@ async function select(s: ShareSubscription) {
   await loadRuns(s.id)
 }
 
+// 切换账号过滤时，若当前选中项被过滤掉，则清空选择，保持详情面板与列表一致
+watch(ownerFilter, () => {
+  if (!selected.value) return
+  if (!displayedSubscriptions.value.some(s => s.id === selected.value!.id)) {
+    selected.value = null
+    runs.value = []
+  }
+})
+
 async function loadRuns(id: string) {
   try {
     runs.value = await listRuns(id, 1, 30)
