@@ -120,8 +120,11 @@ impl ShareSnapshot {
 // 抓取（递归列出分享内容）
 // =====================================================
 
+use std::sync::Arc;
+
 use crate::netdisk::client::NetdiskClient;
 use crate::share_sync::error::ShareSyncError;
+use crate::share_sync::rate_limit::QuotaLimiter;
 use crate::transfer::types::{ShareFileListResult, SharedFileInfo};
 use regex::RegexSet;
 
@@ -157,6 +160,11 @@ pub struct SnapshotCollector<'a> {
     include_index: BTreeSet<String>,
     /// 预编译的 exclude glob → RegexSet
     exclude_set: Option<RegexSet>,
+    /// v2 阶段 6 补全:列目录抓快照同样走全局风控限速器。
+    /// 与 ProductionHooks 的 submit_transfer/submit_download 共用同一个令牌桶,
+    /// 因此「列目录 + 转存提交」合计受同一个全局 RPS 上限约束 — 大分享单轮
+    /// BFS 翻页的 list 突发是最容易撞百度风控 errno=132 的地方,必须限速。
+    rate_limiter: Arc<QuotaLimiter>,
 }
 
 impl<'a> SnapshotCollector<'a> {
@@ -167,6 +175,7 @@ impl<'a> SnapshotCollector<'a> {
         password: Option<String>,
         include_paths: Vec<String>,
         exclude_patterns: Vec<String>,
+        rate_limiter: Arc<QuotaLimiter>,
     ) -> Result<Self, ShareSyncError> {
         let share_link = client
             .parse_share_link(share_url)
@@ -229,6 +238,7 @@ impl<'a> SnapshotCollector<'a> {
             include_paths,
             include_index,
             exclude_set,
+            rate_limiter,
         })
     }
 
@@ -239,6 +249,7 @@ impl<'a> SnapshotCollector<'a> {
         let page_size: u32 = 100;
 
         // Step 1: root
+        self.rate_limiter.acquire().await;
         let root = self
             .client
             .list_share_files_with_randsk(
@@ -294,6 +305,7 @@ impl<'a> SnapshotCollector<'a> {
             }
             let mut page: u32 = 1;
             loop {
+                self.rate_limiter.acquire().await;
                 let batch = self
                     .client
                     .list_share_files_in_dir_with_randsk(
