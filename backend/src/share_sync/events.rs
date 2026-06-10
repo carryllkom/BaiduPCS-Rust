@@ -12,20 +12,36 @@ pub enum ShareSyncEvent {
     SubscriptionCreated {
         subscription_id: String,
         name: String,
+        /// 订阅所属账号；前端据此渲染账号徽章 / 按账号过滤（与其他模块事件一致）。
+        /// 用 `serde(default)` 容忍老事件流缺该字段（事件是瞬时的，不持久化）。
+        #[serde(default)]
+        owner_uid: u64,
     },
     /// 订阅更新
-    SubscriptionUpdated { subscription_id: String },
+    SubscriptionUpdated {
+        subscription_id: String,
+        #[serde(default)]
+        owner_uid: u64,
+    },
     /// 订阅删除
-    SubscriptionDeleted { subscription_id: String },
+    SubscriptionDeleted {
+        subscription_id: String,
+        #[serde(default)]
+        owner_uid: u64,
+    },
     /// 订阅启用/停用
     StatusChanged {
         subscription_id: String,
         enabled: bool,
+        #[serde(default)]
+        owner_uid: u64,
     },
     /// 一次同步开始
     RunStarted {
         run_id: String,
         subscription_id: String,
+        #[serde(default)]
+        owner_uid: u64,
     },
     /// 检测到差异
     DiffDetected {
@@ -34,6 +50,8 @@ pub enum ShareSyncEvent {
         added: usize,
         modified: usize,
         removed: usize,
+        #[serde(default)]
+        owner_uid: u64,
     },
     /// 调度的单条 run_item
     ItemScheduled {
@@ -42,6 +60,8 @@ pub enum ShareSyncEvent {
         path: String,
         target: String,
         action: String,
+        #[serde(default)]
+        owner_uid: u64,
     },
     /// run_item 状态变化
     ItemStatusChanged {
@@ -50,6 +70,8 @@ pub enum ShareSyncEvent {
         path: String,
         status: String,
         error: Option<String>,
+        #[serde(default)]
+        owner_uid: u64,
     },
     /// 一次同步完成
     RunCompleted {
@@ -59,12 +81,16 @@ pub enum ShareSyncEvent {
         modified: usize,
         removed: usize,
         failed: usize,
+        #[serde(default)]
+        owner_uid: u64,
     },
     /// 一次同步失败
     RunFailed {
         run_id: String,
         subscription_id: String,
         error: String,
+        #[serde(default)]
+        owner_uid: u64,
         /// v1 新增：失败原因分类，便于前端红色高亮
         /// - `"quota_full"`        : 网盘空间不足
         /// - `"local_disk_full"`  : 本地磁盘满
@@ -82,8 +108,12 @@ impl ShareSyncEvent {
             Self::SubscriptionCreated {
                 subscription_id, ..
             }
-            | Self::SubscriptionUpdated { subscription_id }
-            | Self::SubscriptionDeleted { subscription_id }
+            | Self::SubscriptionUpdated {
+                subscription_id, ..
+            }
+            | Self::SubscriptionDeleted {
+                subscription_id, ..
+            }
             | Self::StatusChanged {
                 subscription_id, ..
             }
@@ -105,6 +135,22 @@ impl ShareSyncEvent {
             | Self::RunFailed {
                 subscription_id, ..
             } => subscription_id,
+        }
+    }
+
+    /// 关联的 owner_uid（订阅所属账号；前端据此渲染徽章 / 过滤）
+    pub fn owner_uid(&self) -> u64 {
+        match self {
+            Self::SubscriptionCreated { owner_uid, .. }
+            | Self::SubscriptionUpdated { owner_uid, .. }
+            | Self::SubscriptionDeleted { owner_uid, .. }
+            | Self::StatusChanged { owner_uid, .. }
+            | Self::RunStarted { owner_uid, .. }
+            | Self::DiffDetected { owner_uid, .. }
+            | Self::ItemScheduled { owner_uid, .. }
+            | Self::ItemStatusChanged { owner_uid, .. }
+            | Self::RunCompleted { owner_uid, .. }
+            | Self::RunFailed { owner_uid, .. } => *owner_uid,
         }
     }
 
@@ -145,8 +191,10 @@ mod tests {
         let e = ShareSyncEvent::RunStarted {
             run_id: "r1".into(),
             subscription_id: "s1".into(),
+            owner_uid: 7,
         };
         assert_eq!(e.subscription_id(), "s1");
+        assert_eq!(e.owner_uid(), 7);
     }
 
     #[test]
@@ -157,6 +205,7 @@ mod tests {
             added: 1,
             modified: 2,
             removed: 3,
+            owner_uid: 0,
         };
         assert_eq!(e.event_type_name(), "diff_detected");
     }
@@ -170,9 +219,11 @@ mod tests {
             modified: 2,
             removed: 3,
             failed: 0,
+            owner_uid: 5,
         };
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains("\"type\":\"run_completed\""));
+        assert!(json.contains("\"owner_uid\":5"));
     }
 
     #[test]
@@ -182,6 +233,7 @@ mod tests {
             run_id: "r".into(),
             subscription_id: "s".into(),
             error: "网盘空间不足".into(),
+            owner_uid: 0,
             reason: Some("quota_full".into()),
         };
         let json = serde_json::to_string(&e).unwrap();

@@ -114,6 +114,9 @@ impl PollConfig {
 pub struct ShareSubscription {
     /// 订阅 ID（UUID）
     pub id: String,
+    /// 所属账号 uid（多账号隔离）。0 表示历史/未归属数据，由上层在创建/导入时赋值。
+    #[serde(default)]
+    pub owner_uid: u64,
     /// 用户可见名称
     pub name: String,
     /// 分享链接（可含 pwd=xxxx）
@@ -153,6 +156,7 @@ impl ShareSubscription {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4().to_string(),
+            owner_uid: 0,
             name,
             share_url,
             password: None,
@@ -328,6 +332,10 @@ pub struct CreateShareSubscriptionRequest {
     pub delete_missing: Option<bool>,
     #[serde(default)]
     pub poll_config: Option<PollConfig>,
+    /// 显式指定订阅归属账号（多账号场景）。
+    /// 缺省回退到当前活跃账号；兼容前端发的 `owner_uid` 字段名。
+    #[serde(default, alias = "owner_uid")]
+    pub uid: Option<u64>,
 }
 
 impl CreateShareSubscriptionRequest {
@@ -633,8 +641,11 @@ mod tests {
                 schedule_hour: Some(3),
                 schedule_minute: Some(30),
             }),
+            uid: Some(42),
         };
         let sub = req.into_subscription();
+        // into_subscription 不消费 uid（归属由 handler 显式设置），默认仍为 0
+        assert_eq!(sub.owner_uid, 0);
         assert_eq!(sub.password.as_deref(), Some("1234"));
         assert!(sub.delete_missing);
         assert_eq!(sub.conflict_strategy, ConflictStrategy::Skip);

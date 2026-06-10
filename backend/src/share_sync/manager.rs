@@ -14,7 +14,7 @@
 //! - `execute_one(id)`  → 抓取 → diff → 提交 → 持久化 → 广播 WS
 //! - `shutdown()`  → 停所有 scheduler → 关闭连接
 
-use crate::downloader::DownloadManager;
+use crate::auth::Uid;
 use crate::netdisk::client::NetdiskClient;
 use crate::share_sync::config::{ShareSubscription, SyncTarget};
 use crate::share_sync::diff::{diff_snapshots, ShareDiff, ShareModifiedItem};
@@ -26,6 +26,7 @@ use crate::share_sync::executor::{
     ApplyOutcome, ExecutorHooks, NetdiskTargetEntry, ShareSyncExecutor,
 };
 use crate::share_sync::persistence::ShareSyncPersistence;
+use crate::share_sync::resolver::ShareSyncAccountResolver;
 use crate::share_sync::scheduler::SubscriptionScheduler;
 use crate::share_sync::snapshot::{
     CapturedShare, ShareSnapshot, ShareSnapshotItem, SnapshotCollector,
@@ -55,10 +56,8 @@ pub struct ShareSyncManager {
     config_path: PathBuf,
     /// 事件发布器
     publisher: Arc<dyn ShareSyncEventPublisher>,
-    /// NetdiskClient（Option 化以支持初始化时尚未登录）
-    netdisk_client: Arc<tokio::sync::RwLock<Option<NetdiskClient>>>,
-    /// TransferManager（同上）
-    transfer_manager: Arc<tokio::sync::RwLock<Option<Arc<TransferManager>>>>,
+    /// 账号解析器：按订阅 owner_uid 解析其 NetdiskClient / TransferManager（多账号隔离）
+    resolver: Arc<dyn ShareSyncAccountResolver>,
 }
 
 impl std::fmt::Debug for ShareSyncManager {
@@ -74,9 +73,8 @@ impl std::fmt::Debug for ShareSyncManager {
 pub struct ManagerConfig {
     pub config_path: PathBuf,
     pub db_path: PathBuf,
-    pub netdisk_client: Arc<tokio::sync::RwLock<Option<NetdiskClient>>>,
-    pub transfer_manager: Arc<tokio::sync::RwLock<Option<Arc<TransferManager>>>>,
-    pub download_manager: Arc<tokio::sync::RwLock<Option<Arc<DownloadManager>>>>,
+    /// 账号解析器：按订阅 owner_uid 解析对应账号的 NetdiskClient / TransferManager
+    pub resolver: Arc<dyn ShareSyncAccountResolver>,
     pub publisher: Option<Arc<dyn ShareSyncEventPublisher>>,
 }
 
@@ -89,44 +87,18 @@ impl ShareSyncManager {
             std::fs::create_dir_all(parent)?;
         }
 
-        // 从 JSON 恢复（缺失则空）。
-        // 注意：不要在读取/解析失败时静默返回空 —— 那会让用户的订阅在文件损坏时
-        // 悄无声息全部丢失。读失败仅告警；解析失败则把损坏文件改名备份后告警，
-        // 避免下一次 persist_to_disk 直接覆盖掉尚可人工恢复的数据。
-        let subs: Vec<ShareSubscription> = if cfg.config_path.exists() {
-            match std::fs::read_to_string(&cfg.config_path) {
-                Ok(s) => match serde_json::from_str::<Vec<ShareSubscription>>(&s) {
-                    Ok(list) => list,
-                    Err(e) => {
-                        let backup = cfg.config_path.with_extension(format!(
-                            "corrupt.{}.json",
-                            chrono::Utc::now().timestamp()
-                        ));
-                        let backup_hint = match std::fs::rename(&cfg.config_path, &backup) {
-                            Ok(()) => format!("已备份损坏文件到 {}", backup.display()),
-                            Err(re) => format!("备份损坏文件失败: {}", re),
-                        };
-                        error!(
-                            "share-sync: 订阅配置 {} 解析失败，按空列表启动（{}）: {}",
-                            cfg.config_path.display(),
-                            backup_hint,
-                            e
-                        );
-                        Vec::new()
-                    }
-                },
-                Err(e) => {
-                    error!(
-                        "share-sync: 读取订阅配置 {} 失败，按空列表启动: {}",
-                        cfg.config_path.display(),
-                        e
-                    );
-                    Vec::new()
-                }
-            }
-        } else {
+        // 数据库为唯一可信源（订阅已并入主库）。先尝试从 DB 恢复。
+        let mut subs = persistence.list_subscriptions().unwrap_or_else(|e| {
+            error!("share-sync: 从 DB 读取订阅失败，按空列表启动: {}", e);
             Vec::new()
-        };
+        });
+
+        // 一次性兼容旧版本：早期把订阅写在独立的 subscriptions.json。
+        // 仅当 DB 尚无订阅且存在旧 JSON 时导入，导入后把 JSON 改名为 .migrated，
+        // 之后不再读写 JSON（消除 JSON↔DB 双写漂移与损坏静默丢失问题）。
+        if subs.is_empty() && cfg.config_path.exists() {
+            subs = Self::import_legacy_json(&cfg.config_path, &persistence);
+        }
 
         let manager = Arc::new(Self {
             subscriptions: DashMap::new(),
@@ -137,13 +109,10 @@ impl ShareSyncManager {
             publisher: cfg
                 .publisher
                 .unwrap_or_else(|| Arc::new(NoopShareSyncEventPublisher)),
-            netdisk_client: cfg.netdisk_client,
-            transfer_manager: cfg.transfer_manager,
+            resolver: cfg.resolver,
         });
 
         for sub in subs {
-            // 同步到 DB（便于诊断 / 后台 UI）
-            let _ = manager.persistence.upsert_subscription(&sub);
             manager.subscriptions.insert(sub.id.clone(), sub.clone());
             if sub.enabled && sub.poll_config.enabled {
                 let mgr_clone = Arc::clone(&manager);
@@ -158,6 +127,63 @@ impl ShareSyncManager {
         Ok(manager)
     }
 
+    /// 一次性导入旧版 `subscriptions.json` 到主库，成功后把文件改名为 `.migrated`。
+    ///
+    /// 读/解析失败不静默吞掉：读失败仅告警返回空；解析失败把损坏文件改名备份后告警，
+    /// 避免误判为"无旧数据"。导入的订阅 owner_uid 保持 JSON 中的值（旧数据通常为 0，
+    /// 由上层在初始化时按当前活跃账号补归属）。
+    fn import_legacy_json(
+        config_path: &Path,
+        persistence: &ShareSyncPersistence,
+    ) -> Vec<ShareSubscription> {
+        let content = match std::fs::read_to_string(config_path) {
+            Ok(s) => s,
+            Err(e) => {
+                error!(
+                    "share-sync: 读取旧订阅配置 {} 失败，跳过导入: {}",
+                    config_path.display(),
+                    e
+                );
+                return Vec::new();
+            }
+        };
+        let list: Vec<ShareSubscription> = match serde_json::from_str(&content) {
+            Ok(l) => l,
+            Err(e) => {
+                let backup = config_path.with_extension(format!(
+                    "corrupt.{}.json",
+                    chrono::Utc::now().timestamp()
+                ));
+                let hint = match std::fs::rename(config_path, &backup) {
+                    Ok(()) => format!("已备份损坏文件到 {}", backup.display()),
+                    Err(re) => format!("备份损坏文件失败: {}", re),
+                };
+                error!(
+                    "share-sync: 旧订阅配置 {} 解析失败，跳过导入（{}）: {}",
+                    config_path.display(),
+                    hint,
+                    e
+                );
+                return Vec::new();
+            }
+        };
+        for sub in &list {
+            if let Err(e) = persistence.upsert_subscription(sub) {
+                error!("share-sync: 导入旧订阅 {} 到主库失败: {}", sub.id, e);
+            }
+        }
+        let migrated = config_path.with_extension("json.migrated");
+        if let Err(e) = std::fs::rename(config_path, &migrated) {
+            warn!(
+                "share-sync: 旧订阅配置已导入主库，但改名 {} 失败（下次启动会因 DB 已有数据而跳过导入）: {}",
+                migrated.display(),
+                e
+            );
+        }
+        info!("share-sync: 已从旧 JSON 导入 {} 条订阅到主库", list.len());
+        list
+    }
+
     // ===================================================
     // 订阅 CRUD
     // ===================================================
@@ -165,6 +191,15 @@ impl ShareSyncManager {
     pub fn list_subscriptions(&self) -> Vec<ShareSubscription> {
         self.subscriptions
             .iter()
+            .map(|kv| kv.value().clone())
+            .collect()
+    }
+
+    /// 列出归属指定账号的订阅（多账号隔离：handler 按 active_uid 过滤）
+    pub fn list_for_owner(&self, owner_uid: u64) -> Vec<ShareSubscription> {
+        self.subscriptions
+            .iter()
+            .filter(|kv| kv.value().owner_uid == owner_uid)
             .map(|kv| kv.value().clone())
             .collect()
     }
@@ -183,13 +218,13 @@ impl ShareSyncManager {
         }
         self.persistence.upsert_subscription(&sub)?;
         self.subscriptions.insert(sub.id.clone(), sub.clone());
-        self.persist_to_disk();
         if sub.enabled && sub.poll_config.enabled {
             self.start_scheduler_for(&sub);
         }
         self.publisher.publish(ShareSyncEvent::SubscriptionCreated {
             subscription_id: sub.id.clone(),
             name: sub.name.clone(),
+            owner_uid: sub.owner_uid,
         });
         info!("ShareSyncManager: 创建订阅 id={}", sub.id);
         Ok(sub)
@@ -212,7 +247,6 @@ impl ShareSyncManager {
         new_sub.touch();
         self.persistence.upsert_subscription(&new_sub)?;
         self.subscriptions.insert(id.into(), new_sub.clone());
-        self.persist_to_disk();
         // 重启 scheduler（间隔可能变了）
         self.stop_scheduler_for(id);
         if new_sub.enabled && new_sub.poll_config.enabled {
@@ -220,6 +254,7 @@ impl ShareSyncManager {
         }
         self.publisher.publish(ShareSyncEvent::SubscriptionUpdated {
             subscription_id: id.into(),
+            owner_uid: new_sub.owner_uid,
         });
         Ok(new_sub)
     }
@@ -234,7 +269,6 @@ impl ShareSyncManager {
         let sub_clone = sub.clone();
         drop(sub);
         self.persistence.upsert_subscription(&sub_clone)?;
-        self.persist_to_disk();
         if enabled && sub_clone.poll_config.enabled {
             self.start_scheduler_for(&sub_clone);
         } else {
@@ -243,20 +277,22 @@ impl ShareSyncManager {
         self.publisher.publish(ShareSyncEvent::StatusChanged {
             subscription_id: id.into(),
             enabled,
+            owner_uid: sub_clone.owner_uid,
         });
         Ok(())
     }
 
     pub fn delete_subscription(self: &Arc<Self>, id: &str) -> Result<(), ShareSyncError> {
-        if self.subscriptions.remove(id).is_none() {
-            return Err(ShareSyncError::SubscriptionNotFound(id.into()));
-        }
+        let removed = match self.subscriptions.remove(id) {
+            Some((_, sub)) => sub,
+            None => return Err(ShareSyncError::SubscriptionNotFound(id.into())),
+        };
         self.stop_scheduler_for(id);
         // DB 删除（级联清理 snapshots/runs）
         let _ = self.persistence.delete_subscription(id);
-        self.persist_to_disk();
         self.publisher.publish(ShareSyncEvent::SubscriptionDeleted {
             subscription_id: id.into(),
+            owner_uid: removed.owner_uid,
         });
         Ok(())
     }
@@ -313,23 +349,38 @@ impl ShareSyncManager {
         let sub = self
             .get_subscription(id)
             .ok_or_else(|| ShareSyncError::SubscriptionNotFound(id.into()))?;
-        let netdisk = {
-            let g = self.netdisk_client.read().await;
-            g.clone()
-        };
-        let netdisk = netdisk.ok_or_else(|| {
-            ShareSyncError::ConfigError("网盘客户端未登录，请先登录百度账号".into())
+
+        // 多账号隔离：按订阅 owner_uid 解析**该账号**的网盘客户端与转存管理器，
+        // 而非进程当前活跃账号。后台调度对账号 A 的订阅始终用账号 A 的实例，
+        // 账号切换无需 relink。任一未就绪 → 明确报错，绝不落到错误账号。
+        let owner_uid = sub.owner_uid;
+        let netdisk = self.resolver.netdisk_client(owner_uid).await.ok_or_else(|| {
+            ShareSyncError::ConfigError(format!(
+                "订阅所属账号(uid={})未登录，请先登录该账号后再同步",
+                owner_uid
+            ))
         })?;
+        let transfer = self
+            .resolver
+            .transfer_manager(owner_uid)
+            .await
+            .ok_or_else(|| {
+                ShareSyncError::ConfigError(format!(
+                    "订阅所属账号(uid={})的转存管理器未就绪",
+                    owner_uid
+                ))
+            })?;
 
         let run_id = Uuid::new_v4().to_string();
         self.publisher.publish(ShareSyncEvent::RunStarted {
             run_id: run_id.clone(),
             subscription_id: id.into(),
+            owner_uid,
         });
 
         // 1) 抓取
         let (captured, curr_snapshot) = match SnapshotCollector::from_url(
-            &netdisk,
+            netdisk.as_ref(),
             &sub.share_url,
             sub.password.clone(),
             sub.include_paths.clone(),
@@ -340,12 +391,12 @@ impl ShareSyncManager {
             Ok(collector) => match collector.collect().await {
                 Ok(t) => t,
                 Err(e) => {
-                    self.fail_run(&run_id, id, &format!("抓取失败: {}", e));
+                    self.fail_run(&run_id, id, owner_uid, &format!("抓取失败: {}", e));
                     return Err(e);
                 }
             },
             Err(e) => {
-                self.fail_run(&run_id, id, &format!("抓取初始化失败: {}", e));
+                self.fail_run(&run_id, id, owner_uid, &format!("抓取初始化失败: {}", e));
                 return Err(e);
             }
         };
@@ -362,7 +413,7 @@ impl ShareSyncManager {
         if let Err(e) =
             augment_diff_with_local_target_state(&sub, prev.as_ref(), &curr_snapshot, &mut diff)
         {
-            self.fail_run(&run_id, id, &format!("本地目标校验失败: {}", e));
+            self.fail_run(&run_id, id, owner_uid, &format!("本地目标校验失败: {}", e));
             return Err(e);
         }
 
@@ -372,13 +423,15 @@ impl ShareSyncManager {
             added: diff.added.iter().filter(|i| !i.is_dir).count(),
             modified: diff.modified.iter().filter(|i| !i.new.is_dir).count(),
             removed: diff.removed.iter().filter(|i| !i.is_dir).count(),
+            owner_uid,
         });
 
         // 4) 执行
         let hooks = ProductionHooks {
-            netdisk: Arc::new(netdisk.clone()),
-            transfer: self.transfer_manager.clone(),
+            netdisk,
+            transfer,
             captured: captured.clone(),
+            owner_uid,
         };
         let executor = ShareSyncExecutor::new(&sub, &self.persistence, &hooks);
         let outcome = executor
@@ -410,6 +463,7 @@ impl ShareSyncManager {
                     modified: outcome.diff_summary.modified,
                     removed: outcome.diff_summary.removed,
                     failed: outcome.diff_summary.failed,
+                    owner_uid,
                 });
             }
             crate::share_sync::types::RunStatus::Failed => {
@@ -420,6 +474,7 @@ impl ShareSyncManager {
                         .error
                         .clone()
                         .unwrap_or_else(|| "unknown error".into()),
+                    owner_uid,
                     // v1: 目前 outcome.error 仍以原始字符串承载，reason 由 executor
                     // 在 quota/local_disk_full 早停时显式设置。
                     // 此分支对应 manager 自身检查到的失败（如 start_run 失败），
@@ -432,7 +487,7 @@ impl ShareSyncManager {
         Ok(outcome)
     }
 
-    fn fail_run(&self, run_id: &str, sub_id: &str, err: &str) {
+    fn fail_run(&self, run_id: &str, sub_id: &str, owner_uid: u64, err: &str) {
         use crate::share_sync::types::{DiffSummary, RunStatus};
         let now = chrono::Utc::now().timestamp();
         let _ = self.persistence.start_run(run_id, sub_id, now);
@@ -447,6 +502,7 @@ impl ShareSyncManager {
             run_id: run_id.into(),
             subscription_id: sub_id.into(),
             error: err.into(),
+            owner_uid,
             reason: None,
         });
     }
@@ -501,26 +557,6 @@ impl ShareSyncManager {
     pub fn persistence(&self) -> &Arc<ShareSyncPersistence> {
         &self.persistence
     }
-
-    // ===================================================
-    // 内部辅助
-    // ===================================================
-
-    fn persist_to_disk(&self) {
-        let all: Vec<ShareSubscription> = self
-            .subscriptions
-            .iter()
-            .map(|kv| kv.value().clone())
-            .collect();
-        match serde_json::to_string_pretty(&all) {
-            Ok(s) => {
-                if let Err(e) = std::fs::write(&self.config_path, s) {
-                    error!("写订阅 JSON 失败: {}", e);
-                }
-            }
-            Err(e) => error!("序列化订阅失败: {}", e),
-        }
-    }
 }
 
 fn should_advance_snapshot_baseline(status: RunStatus) -> bool {
@@ -532,9 +568,13 @@ fn should_advance_snapshot_baseline(status: RunStatus) -> bool {
 // =====================================================
 
 struct ProductionHooks {
+    /// 该订阅所属账号的网盘客户端（已按 owner_uid 解析）
     netdisk: Arc<NetdiskClient>,
-    transfer: Arc<tokio::sync::RwLock<Option<Arc<TransferManager>>>>,
+    /// 该订阅所属账号的转存管理器（已按 owner_uid 解析）
+    transfer: Arc<TransferManager>,
     captured: CapturedShare,
+    /// 订阅所属账号 uid，透传给 transfer 的 owner_uid_override，确保落到正确账号
+    owner_uid: u64,
 }
 
 #[async_trait]
@@ -546,7 +586,7 @@ impl ExecutorHooks for ProductionHooks {
         item: &ShareSnapshotItem,
         internal_label: Option<&str>,
     ) -> Result<String, ShareSyncError> {
-        let tm = self.transfer_manager().await?;
+        let tm = self.transfer_manager();
         use crate::transfer::manager::CreateTransferRequest;
         use crate::transfer::types::SharedFileInfo;
 
@@ -577,7 +617,7 @@ impl ExecutorHooks for ProductionHooks {
                 size: item.size,
                 name: item.name.clone(),
             }]),
-            owner_uid_override: None,
+            owner_uid_override: Some(Uid::new(self.owner_uid)),
         };
         let resp = tm
             .create_task(req)
@@ -686,7 +726,7 @@ impl ExecutorHooks for ProductionHooks {
         strategy: ConflictStrategy,
     ) -> Result<String, ShareSyncError> {
         let local_download_root = share_direct_download_root(local_dir, item)?;
-        let tm = self.transfer_manager().await?;
+        let tm = self.transfer_manager();
         use crate::transfer::manager::CreateTransferRequest;
         use crate::transfer::types::SharedFileInfo;
 
@@ -713,7 +753,7 @@ impl ExecutorHooks for ProductionHooks {
                 size: item.size,
                 name: item.name.clone(),
             }]),
-            owner_uid_override: None,
+            owner_uid_override: Some(Uid::new(self.owner_uid)),
         };
 
         let resp = tm
@@ -742,7 +782,7 @@ impl ExecutorHooks for ProductionHooks {
         require_download_completion: bool,
         timeout: Duration,
     ) -> Result<(), ShareSyncError> {
-        let tm = self.transfer_manager().await?;
+        let tm = self.transfer_manager();
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let task = tm.get_task(task_id).await.ok_or_else(|| {
@@ -860,7 +900,7 @@ impl ExecutorHooks for ProductionHooks {
                 "submit_transfer_batch 被传入空 items 列表".to_string(),
             ));
         }
-        let tm = self.transfer_manager().await?;
+        let tm = self.transfer_manager();
         use crate::transfer::manager::CreateTransferRequest;
         use crate::transfer::types::SharedFileInfo;
 
@@ -889,7 +929,7 @@ impl ExecutorHooks for ProductionHooks {
             download_conflict_strategy: None,
             selected_fs_ids: Some(selected_fs_ids),
             selected_files: Some(selected_files),
-            owner_uid_override: None,
+            owner_uid_override: Some(Uid::new(self.owner_uid)),
         };
         let resp = tm
             .create_task(req)
@@ -925,7 +965,7 @@ impl ExecutorHooks for ProductionHooks {
                 "submit_download_batch 被传入空 items 列表".to_string(),
             ));
         }
-        let tm = self.transfer_manager().await?;
+        let tm = self.transfer_manager();
         use crate::transfer::manager::CreateTransferRequest;
         use crate::transfer::types::SharedFileInfo;
 
@@ -966,7 +1006,7 @@ impl ExecutorHooks for ProductionHooks {
             download_conflict_strategy: Some(download_conflict_strategy_for_share_sync(strategy)),
             selected_fs_ids: Some(selected_fs_ids),
             selected_files: Some(selected_files),
-            owner_uid_override: None,
+            owner_uid_override: Some(Uid::new(self.owner_uid)),
         };
 
         let resp = tm
@@ -993,12 +1033,8 @@ impl ExecutorHooks for ProductionHooks {
 }
 
 impl ProductionHooks {
-    async fn transfer_manager(&self) -> Result<Arc<TransferManager>, ShareSyncError> {
-        self.transfer
-            .read()
-            .await
-            .clone()
-            .ok_or_else(|| ShareSyncError::ConfigError("TransferManager 未初始化".into()))
+    fn transfer_manager(&self) -> Arc<TransferManager> {
+        self.transfer.clone()
     }
 }
 
@@ -1205,6 +1241,7 @@ mod tests {
     use super::*;
     use crate::share_sync::config::{LocalTarget, NetdiskTarget, SyncTarget};
     use crate::share_sync::events::NoopShareSyncEventPublisher;
+    use crate::share_sync::resolver::StaticAccountResolver;
     use tempfile::tempdir;
 
     fn sub(name: &str) -> ShareSubscription {
@@ -1218,28 +1255,13 @@ mod tests {
         )
     }
 
-    fn empty_managers() -> (
-        Arc<tokio::sync::RwLock<Option<NetdiskClient>>>,
-        Arc<tokio::sync::RwLock<Option<Arc<TransferManager>>>>,
-        Arc<tokio::sync::RwLock<Option<Arc<DownloadManager>>>>,
-    ) {
-        (
-            Arc::new(tokio::sync::RwLock::new(None)),
-            Arc::new(tokio::sync::RwLock::new(None)),
-            Arc::new(tokio::sync::RwLock::new(None)),
-        )
-    }
-
     #[tokio::test]
     async fn test_new_manager_empty() {
         let dir = tempdir().unwrap();
-        let (net, tx, dl) = empty_managers();
         let m = ShareSyncManager::new(ManagerConfig {
             config_path: dir.path().join("subs.json"),
             db_path: dir.path().join("s.db"),
-            netdisk_client: net,
-            transfer_manager: tx,
-            download_manager: dl,
+            resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
         .await
@@ -1250,13 +1272,10 @@ mod tests {
     #[tokio::test]
     async fn test_create_get_delete() {
         let dir = tempdir().unwrap();
-        let (net, tx, dl) = empty_managers();
         let m = ShareSyncManager::new(ManagerConfig {
             config_path: dir.path().join("subs.json"),
             db_path: dir.path().join("s.db"),
-            netdisk_client: net,
-            transfer_manager: tx,
-            download_manager: dl,
+            resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
         .await
@@ -1265,24 +1284,54 @@ mod tests {
         assert_eq!(m.list_subscriptions().len(), 1);
         assert!(m.get_subscription(&s.id).is_some());
 
-        // JSON 已写入
+        // DB 为唯一可信源：不再写 JSON（已移除 JSON 双写）
         let json_path = dir.path().join("subs.json");
-        assert!(json_path.exists());
+        assert!(!json_path.exists());
 
         m.delete_subscription(&s.id).unwrap();
         assert_eq!(m.list_subscriptions().len(), 0);
     }
 
     #[tokio::test]
-    async fn test_update_subscription_preserves_id_and_created_at() {
+    async fn test_list_for_owner_isolates_accounts() {
         let dir = tempdir().unwrap();
-        let (net, tx, dl) = empty_managers();
         let m = ShareSyncManager::new(ManagerConfig {
             config_path: dir.path().join("subs.json"),
             db_path: dir.path().join("s.db"),
-            netdisk_client: net,
-            transfer_manager: tx,
-            download_manager: dl,
+            resolver: Arc::new(StaticAccountResolver::none()),
+            publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
+        })
+        .await
+        .unwrap();
+
+        let mut a = sub("a");
+        a.owner_uid = 1;
+        let mut b = sub("b");
+        b.owner_uid = 2;
+        m.create_subscription(a).unwrap();
+        m.create_subscription(b).unwrap();
+
+        // 账号 1 只看见自己的订阅，看不见账号 2 的
+        let owner1 = m.list_for_owner(1);
+        assert_eq!(owner1.len(), 1);
+        assert_eq!(owner1[0].name, "a");
+        assert!(owner1.iter().all(|s| s.owner_uid == 1));
+
+        let owner2 = m.list_for_owner(2);
+        assert_eq!(owner2.len(), 1);
+        assert_eq!(owner2[0].name, "b");
+
+        // 未知账号看不到任何订阅
+        assert_eq!(m.list_for_owner(999).len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_update_subscription_preserves_id_and_created_at() {
+        let dir = tempdir().unwrap();
+        let m = ShareSyncManager::new(ManagerConfig {
+            config_path: dir.path().join("subs.json"),
+            db_path: dir.path().join("s.db"),
+            resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
         .await
@@ -1301,13 +1350,10 @@ mod tests {
     #[tokio::test]
     async fn test_set_enabled_persists_state() {
         let dir = tempdir().unwrap();
-        let (net, tx, dl) = empty_managers();
         let m = ShareSyncManager::new(ManagerConfig {
             config_path: dir.path().join("subs.json"),
             db_path: dir.path().join("s.db"),
-            netdisk_client: net,
-            transfer_manager: tx,
-            download_manager: dl,
+            resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
         .await
@@ -1446,13 +1492,10 @@ mod tests {
     #[tokio::test]
     async fn test_create_invalid_subscription_rejected() {
         let dir = tempdir().unwrap();
-        let (net, tx, dl) = empty_managers();
         let m = ShareSyncManager::new(ManagerConfig {
             config_path: dir.path().join("subs.json"),
             db_path: dir.path().join("s.db"),
-            netdisk_client: net,
-            transfer_manager: tx,
-            download_manager: dl,
+            resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
         .await
@@ -1472,13 +1515,10 @@ mod tests {
         let all = vec![s.clone()];
         std::fs::write(&json_path, serde_json::to_string(&all).unwrap()).unwrap();
 
-        let (net, tx, dl) = empty_managers();
         let m = ShareSyncManager::new(ManagerConfig {
             config_path: json_path,
             db_path: dir.path().join("s.db"),
-            netdisk_client: net,
-            transfer_manager: tx,
-            download_manager: dl,
+            resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
         .await
@@ -1491,13 +1531,10 @@ mod tests {
     #[tokio::test]
     async fn test_trigger_one_when_not_logged_in_fails() {
         let dir = tempdir().unwrap();
-        let (net, tx, dl) = empty_managers();
         let m = ShareSyncManager::new(ManagerConfig {
             config_path: dir.path().join("subs.json"),
             db_path: dir.path().join("s.db"),
-            netdisk_client: net,
-            transfer_manager: tx,
-            download_manager: dl,
+            resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
         .await

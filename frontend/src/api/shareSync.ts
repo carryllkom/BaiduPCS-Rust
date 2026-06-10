@@ -47,6 +47,8 @@ export interface ShareSubscription {
   enabled: boolean
   created_at: string
   updated_at: string
+  /** 订阅所属账号 uid；前端据此渲染账号徽章 / 按账号过滤 */
+  owner_uid: number
 }
 
 export interface CreateShareSubscriptionRequest {
@@ -59,6 +61,8 @@ export interface CreateShareSubscriptionRequest {
   conflict_strategy?: ConflictStrategy
   delete_missing?: boolean
   poll_config?: PollConfig
+  /** 显式指定归属账号；缺省由后端回退到当前活跃账号 */
+  owner_uid?: number
 }
 
 export interface UpdateShareSubscriptionRequest {
@@ -140,21 +144,23 @@ export interface ShareSnapshot {
  * 分享同步 WS 事件载荷（与后端 ShareSyncEvent 对齐）
  */
 export type ShareSyncWsEvent =
-  | { type: 'subscription_created'; subscription_id: string; name: string }
-  | { type: 'subscription_updated'; subscription_id: string }
-  | { type: 'subscription_deleted'; subscription_id: string }
-  | { type: 'status_changed'; subscription_id: string; enabled: boolean }
-  | { type: 'diff_detected'; run_id: string; subscription_id: string; added: number; modified: number; removed: number }
-  | { type: 'run_started'; run_id: string; subscription_id: string }
-  | { type: 'run_completed'; run_id: string; subscription_id: string; added: number; modified: number; removed: number; failed: number }
-  | { type: 'run_failed'; run_id: string; subscription_id: string; error: string }
+  | { type: 'subscription_created'; subscription_id: string; name: string; owner_uid?: number }
+  | { type: 'subscription_updated'; subscription_id: string; owner_uid?: number }
+  | { type: 'subscription_deleted'; subscription_id: string; owner_uid?: number }
+  | { type: 'status_changed'; subscription_id: string; enabled: boolean; owner_uid?: number }
+  | { type: 'diff_detected'; run_id: string; subscription_id: string; added: number; modified: number; removed: number; owner_uid?: number }
+  | { type: 'run_started'; run_id: string; subscription_id: string; owner_uid?: number }
+  | { type: 'run_completed'; run_id: string; subscription_id: string; added: number; modified: number; removed: number; failed: number; owner_uid?: number }
+  | { type: 'run_failed'; run_id: string; subscription_id: string; error: string; owner_uid?: number }
 
 // ==================== API ====================
 
 const BASE = '/share-sync'
 
-export async function listSubscriptions(): Promise<ShareSubscription[]> {
-  const r = await rawApiClient.get<{ success: boolean; data: ShareSubscription[] }>(`${BASE}/subscriptions`)
+export async function listSubscriptions(uid?: number | null): Promise<ShareSubscription[]> {
+  // 缺省返回全部账号（与 transfer/autobackup 一致）；传 uid 时按账号过滤。
+  const params = typeof uid === 'number' ? { uid } : undefined
+  const r = await rawApiClient.get<{ success: boolean; data: ShareSubscription[] }>(`${BASE}/subscriptions`, { params })
   return r.data.data
 }
 
