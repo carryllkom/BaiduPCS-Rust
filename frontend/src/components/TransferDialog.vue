@@ -59,11 +59,49 @@
           />
         </el-form-item>
 
-        <!-- 转存后下载 -->
-        <el-form-item label="转存后下载">
+        <!-- 转存后下载（开启“保持同步”时隐藏） -->
+        <el-form-item v-if="!form.keepSync" label="转存后下载">
           <el-switch v-model="form.autoDownload" />
           <span class="switch-tip">开启后将自动下载到本地</span>
         </el-form-item>
+
+        <!-- 保持同步：勾选后不是一次性转存，而是在「分享同步」创建一个订阅 -->
+        <el-form-item label="保持同步">
+          <el-switch v-model="form.keepSync" />
+          <span class="switch-tip">开启后创建订阅，持续监听该分享的新增/变更并自动转存</span>
+        </el-form-item>
+
+        <!-- 保持同步展开块：订阅独有字段 -->
+        <template v-if="form.keepSync">
+          <el-form-item label="订阅名称" prop="syncName">
+            <el-input
+                v-model="form.syncName"
+                placeholder="如：剧集合集同步"
+                maxlength="60"
+            />
+          </el-form-item>
+          <el-form-item label="轮询间隔">
+            <el-input-number
+                v-model="form.syncIntervalSecs"
+                :min="600"
+                :max="86400"
+                :step="300"
+            />
+            <span class="switch-tip">秒（最小 600 = 10 分钟）</span>
+          </el-form-item>
+          <el-form-item label="同步范围">
+            <ShareIncludeExcludeEditor
+                :share-url="form.shareUrl"
+                :password="form.password || null"
+                v-model:include-paths="form.includePaths"
+                v-model:exclude-patterns="form.excludePatterns"
+            />
+          </el-form-item>
+          <div class="sync-hint">
+            不选同步路径＝订阅<strong>整个分享</strong>；选中目录＝该子树（含未来新增）同步，选中文件＝只同步该文件。
+            目标默认为上方“保存到”的网盘目录；如需添加本地目标、改为定时轮询或更多高级项，可创建后在「分享同步」页编辑。
+          </div>
+        </template>
       </el-form>
     </template>
 
@@ -99,24 +137,34 @@
     <template #footer>
       <div class="dialog-footer">
         <el-button @click="handleClose">取消</el-button>
-        <!-- 输入步骤：显示"选择分享文件"和"转存全部"按钮 -->
+        <!-- 输入步骤：保持同步时只显示“创建同步订阅”；否则是“选择分享文件/转存全部” -->
         <template v-if="step === 'input'">
           <el-button
+              v-if="form.keepSync"
               type="primary"
-              :loading="previewing"
-              :disabled="submitting"
-              @click="handlePreview"
-          >
-            {{ previewing ? '加载中...' : '选择分享文件' }}
-          </el-button>
-          <el-button
-              type="success"
               :loading="submitting"
-              :disabled="previewing"
-              @click="handleTransferAll"
+              @click="createSyncSubscription"
           >
-            {{ submitting ? '转存中...' : '转存全部' }}
+            {{ submitting ? '创建中...' : '创建同步订阅' }}
           </el-button>
+          <template v-else>
+            <el-button
+                type="primary"
+                :loading="previewing"
+                :disabled="submitting"
+                @click="handlePreview"
+            >
+              {{ previewing ? '加载中...' : '选择分享文件' }}
+            </el-button>
+            <el-button
+                type="success"
+                :loading="submitting"
+                :disabled="previewing"
+                @click="handleTransferAll"
+            >
+              {{ submitting ? '转存中...' : '转存全部' }}
+            </el-button>
+          </template>
         </template>
         <!-- 选择步骤：显示开始转存按钮 -->
         <el-button
@@ -152,6 +200,7 @@ import { Link, Key, ArrowLeft } from '@element-plus/icons-vue'
 import { useIsMobile } from '@/utils/responsive'
 import NetdiskPathSelector from './NetdiskPathSelector.vue'
 import ShareFileSelector from './ShareFileSelector.vue'
+import ShareIncludeExcludeEditor from './ShareIncludeExcludeEditor.vue'
 import { FilePickerModal } from '@/components/FilePicker'
 
 // 响应式检测
@@ -172,16 +221,22 @@ import {
   type TransferConfig,
   type DownloadConfig
 } from '@/api/config'
+import { createSubscription, type CreateShareSubscriptionRequest } from '@/api/shareSync'
+import { useAuthStore } from '@/stores/auth'
+
+const authStore = useAuthStore()
 
 const props = defineProps<{
   modelValue: boolean
   currentPath?: string    // FilesView 当前浏览的目录路径
   currentFsId?: number    // FilesView 当前浏览的目录 fs_id
+  defaultKeepSync?: boolean  // 打开时是否默认勾选“保持同步”（分享同步页入口）
 }>()
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
   'success': [taskId: string]
+  'sync-created': [subscriptionId: string]
 }>()
 
 // 对话框可见性
@@ -200,6 +255,12 @@ const form = reactive({
   savePath: '/',
   saveFsId: 0,
   autoDownload: false,
+  // 保持同步（创建订阅）
+  keepSync: false,
+  syncName: '',
+  syncIntervalSecs: 1800,
+  includePaths: [] as string[],
+  excludePatterns: [] as string[],
 })
 
 // 对话框步骤状态
@@ -254,6 +315,18 @@ const rules: FormRules = {
   ],
   savePath: [
     { required: true, message: '请选择保存位置', trigger: 'change' }
+  ],
+  syncName: [
+    {
+      validator: (_, value, callback) => {
+        if (form.keepSync && (!value || !String(value).trim())) {
+          callback(new Error('请填写订阅名称'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur'
+    }
   ]
 }
 
@@ -272,6 +345,11 @@ async function handleOpen() {
     downloadConfig.value = appConfig.download
 
     form.autoDownload = transferConfig.value?.default_behavior === 'transfer_and_download'
+    form.keepSync = props.defaultKeepSync ?? false
+    form.syncName = ''
+    form.syncIntervalSecs = 1800
+    form.includePaths = []
+    form.excludePatterns = []
     await setDefaultSavePath()
   } catch (error) {
     console.error('加载转存配置失败:', error)
@@ -306,6 +384,11 @@ function handleClose() {
   form.savePath = '/'
   form.saveFsId = 0
   form.autoDownload = false
+  form.keepSync = false
+  form.syncName = ''
+  form.syncIntervalSecs = 1800
+  form.includePaths = []
+  form.excludePatterns = []
   errorMessage.value = ''
   passwordError.value = ''
   // 重置文件选择状态
@@ -403,6 +486,64 @@ function handlePreviewError(error: any) {
       } else {
         errorMessage.value = message || '预览失败，请稍后重试'
       }
+  }
+}
+
+// 保持同步：创建订阅（而非一次性转存）
+// include_paths / exclude_patterns 由 ShareIncludeExcludeEditor 收集，
+// 其树选择器产出的是“分享根相对路径”命名空间（与后端 snapshot 匹配一致），
+// 不填则同步整个分享。
+async function createSyncSubscription() {
+  // 复用表单校验（分享链接/提取码/保存位置 + 订阅名称）
+  try {
+    await formRef.value?.validate()
+  } catch {
+    return
+  }
+
+  const name = form.syncName.trim()
+  const interval = Number(form.syncIntervalSecs)
+  if (!Number.isFinite(interval) || interval < 600) {
+    ElMessage.error('轮询间隔不能小于 600 秒')
+    return
+  }
+
+  submitting.value = true
+  errorMessage.value = ''
+  try {
+    const req: CreateShareSubscriptionRequest = {
+      name,
+      share_url: form.shareUrl.trim(),
+      password: form.password || null,
+      include_paths: form.includePaths,
+      exclude_patterns: form.excludePatterns,
+      targets: [
+        { kind: 'netdisk', remote_path: form.savePath, save_fs_id: form.saveFsId },
+      ],
+      poll_config: {
+        enabled: true,
+        mode: 'interval',
+        interval_secs: interval,
+        schedule_hour: null,
+        schedule_minute: null,
+      },
+      // 显式归属当前活跃账号（缺省由后端回退）
+      owner_uid: authStore.activeUid ?? undefined,
+    }
+    const sub = await createSubscription(req)
+    ElMessage.success('已创建同步订阅，可在「分享同步」页管理')
+    emit('sync-created', sub.id)
+    handleClose()
+  } catch (e: unknown) {
+    const ax = e as { response?: { data?: { message?: string; error?: string; msg?: string } }; message?: string }
+    errorMessage.value =
+      ax?.response?.data?.message ||
+      ax?.response?.data?.error ||
+      ax?.response?.data?.msg ||
+      ax?.message ||
+      '创建订阅失败'
+  } finally {
+    submitting.value = false
   }
 }
 
@@ -568,6 +709,13 @@ watch(() => form.password, () => {
 .switch-tip {
   margin-left: 12px;
   font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+
+.sync-hint {
+  margin: 0 0 8px 100px;
+  font-size: 12px;
+  line-height: 1.5;
   color: var(--el-text-color-secondary);
 }
 
