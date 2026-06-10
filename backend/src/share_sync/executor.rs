@@ -192,6 +192,10 @@ pub struct ApplyOutcome {
     pub status: RunStatus,
     pub diff_summary: DiffSummary,
     pub error: Option<String>,
+    /// 是否有子项因资源类原因（网盘配额满 / 本地磁盘满）被跳过。
+    /// 这类项虽然不把 run 标记为业务失败，但**尚未真正落地**，
+    /// 因此调用方不应据此推进快照基线，否则被跳过的项会被误标为已同步而永不重试。
+    pub resource_skipped: bool,
 }
 
 /// 同步执行器
@@ -237,6 +241,7 @@ impl<'a> ShareSyncExecutor<'a> {
                 status: RunStatus::Failed,
                 diff_summary: DiffSummary::default(),
                 error: Some(format!("启动 run 失败: {}", e)),
+                resource_skipped: false,
             };
         }
 
@@ -396,6 +401,7 @@ impl<'a> ShareSyncExecutor<'a> {
             status,
             diff_summary: summary,
             error: run_error,
+            resource_skipped: any_quota_skip,
         }
     }
 
@@ -439,6 +445,7 @@ impl<'a> ShareSyncExecutor<'a> {
                 status: RunStatus::Failed,
                 diff_summary: DiffSummary::default(),
                 error: Some(format!("启动 run 失败: {}", e)),
+                resource_skipped: false,
             };
         }
 
@@ -792,6 +799,7 @@ impl<'a> ShareSyncExecutor<'a> {
             status,
             diff_summary: summary,
             error,
+            resource_skipped: quota_only,
         }
     }
 
@@ -2165,6 +2173,12 @@ mod tests {
         assert_eq!(outcome.diff_summary.failed, 0);
         assert_eq!(outcome.diff_summary.skipped, 1);
         assert!(outcome.diff_summary.added == 1);
+        // 资源类跳过必须置位 resource_skipped，调用方据此**不推进**快照基线，
+        // 否则被跳过的文件会被误标为已同步而永不重试（见 manager::execute_one）。
+        assert!(
+            outcome.resource_skipped,
+            "quota 跳过时 resource_skipped 必须为 true，以阻止基线推进"
+        );
         // run_item 行：status=Skipped, reason=quota_full
         let items = pm.list_run_items(&outcome.run_id).unwrap();
         assert_eq!(items.len(), 1);
@@ -2204,6 +2218,10 @@ mod tests {
         assert_eq!(outcome.status, RunStatus::Completed);
         assert_eq!(outcome.diff_summary.skipped, 1);
         assert_eq!(outcome.diff_summary.failed, 0);
+        assert!(
+            outcome.resource_skipped,
+            "download quota 跳过时 resource_skipped 必须为 true"
+        );
         let items = pm.list_run_items(&outcome.run_id).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].status, "skipped");

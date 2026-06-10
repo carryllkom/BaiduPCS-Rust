@@ -46,6 +46,10 @@ pub enum ShareSyncError {
     #[error("订阅已存在: {0}")]
     SubscriptionExists(String),
 
+    /// 同一订阅已有 run 在执行（并发触发去重）
+    #[error("订阅已有同步任务在执行中: {0}")]
+    AlreadyRunning(String),
+
     /// 内部错误
     #[error("内部错误: {0}")]
     Internal(String),

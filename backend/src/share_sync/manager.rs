@@ -38,7 +38,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 /// 顶层 Manager
@@ -47,6 +47,8 @@ pub struct ShareSyncManager {
     subscriptions: DashMap<String, ShareSubscription>,
     /// 订阅 ID → Scheduler
     schedulers: DashMap<String, SubscriptionScheduler>,
+    /// 正在执行中的订阅 ID 集合（并发触发去重；presence = 有 run 在跑）
+    running: DashMap<String, ()>,
     /// 持久化层
     persistence: Arc<ShareSyncPersistence>,
     /// 配置文件路径（JSON）
@@ -87,10 +89,41 @@ impl ShareSyncManager {
             std::fs::create_dir_all(parent)?;
         }
 
-        // 从 JSON 恢复（缺失则空）
+        // 从 JSON 恢复（缺失则空）。
+        // 注意：不要在读取/解析失败时静默返回空 —— 那会让用户的订阅在文件损坏时
+        // 悄无声息全部丢失。读失败仅告警；解析失败则把损坏文件改名备份后告警，
+        // 避免下一次 persist_to_disk 直接覆盖掉尚可人工恢复的数据。
         let subs: Vec<ShareSubscription> = if cfg.config_path.exists() {
-            let s = std::fs::read_to_string(&cfg.config_path).unwrap_or_default();
-            serde_json::from_str(&s).unwrap_or_default()
+            match std::fs::read_to_string(&cfg.config_path) {
+                Ok(s) => match serde_json::from_str::<Vec<ShareSubscription>>(&s) {
+                    Ok(list) => list,
+                    Err(e) => {
+                        let backup = cfg.config_path.with_extension(format!(
+                            "corrupt.{}.json",
+                            chrono::Utc::now().timestamp()
+                        ));
+                        let backup_hint = match std::fs::rename(&cfg.config_path, &backup) {
+                            Ok(()) => format!("已备份损坏文件到 {}", backup.display()),
+                            Err(re) => format!("备份损坏文件失败: {}", re),
+                        };
+                        error!(
+                            "share-sync: 订阅配置 {} 解析失败，按空列表启动（{}）: {}",
+                            cfg.config_path.display(),
+                            backup_hint,
+                            e
+                        );
+                        Vec::new()
+                    }
+                },
+                Err(e) => {
+                    error!(
+                        "share-sync: 读取订阅配置 {} 失败，按空列表启动: {}",
+                        cfg.config_path.display(),
+                        e
+                    );
+                    Vec::new()
+                }
+            }
         } else {
             Vec::new()
         };
@@ -98,6 +131,7 @@ impl ShareSyncManager {
         let manager = Arc::new(Self {
             subscriptions: DashMap::new(),
             schedulers: DashMap::new(),
+            running: DashMap::new(),
             persistence,
             config_path: cfg.config_path,
             publisher: cfg
@@ -253,6 +287,29 @@ impl ShareSyncManager {
 
     /// 执行一次（由 scheduler 调用或 trigger_one 同步入口）
     pub async fn execute_one(&self, id: &str) -> Result<ApplyOutcome, ShareSyncError> {
+        // 全局并发去重：同一订阅同一时刻只允许一个 run 在执行。
+        // scheduler 的 running 标志只防它自己循环内重入；这里覆盖所有入口
+        // （手动 trigger / 被禁用订阅的 spawn 路径 / 多个调度器并存），
+        // 避免并发 run 重复转存同一批文件并产生快照基线竞争。
+        if self.running.insert(id.to_string(), ()).is_some() {
+            debug!("share-sync: 订阅 {} 已有 run 在执行，跳过本次触发", id);
+            return Err(ShareSyncError::AlreadyRunning(id.into()));
+        }
+        // RAII 守卫：无论从哪条分支返回都移除 in-flight 标记。
+        struct RunGuard<'g> {
+            running: &'g DashMap<String, ()>,
+            id: String,
+        }
+        impl Drop for RunGuard<'_> {
+            fn drop(&mut self) {
+                self.running.remove(&self.id);
+            }
+        }
+        let _run_guard = RunGuard {
+            running: &self.running,
+            id: id.to_string(),
+        };
+
         let sub = self
             .get_subscription(id)
             .ok_or_else(|| ShareSyncError::SubscriptionNotFound(id.into()))?;
@@ -328,14 +385,17 @@ impl ShareSyncManager {
             .apply_with_run_id(run_id.clone(), &captured, &diff)
             .await;
 
-        if should_advance_snapshot_baseline(outcome.status) {
+        // 仅当 run 完成**且**没有任何子项因资源类原因（配额满 / 本地磁盘满）被跳过时，
+        // 才推进快照基线。否则被跳过、尚未真正落地的项会被写入新基线，导致下一次
+        // diff 不再包含它们 —— 即使后来腾出空间也不会补传。
+        if should_advance_snapshot_baseline(outcome.status) && !outcome.resource_skipped {
             if let Err(e) = self.persistence.save_snapshot(&curr_snapshot) {
                 warn!("save_snapshot 失败，下一次同步会重试本次 diff: {}", e);
             }
         } else {
             warn!(
-                "share-sync: run 未完全成功，不推进快照基线，下一次将重试 diff: run_id={}, status={:?}, failed={}",
-                outcome.run_id, outcome.status, outcome.diff_summary.failed
+                "share-sync: run 未完全成功或有资源类跳过，不推进快照基线，下一次将重试 diff: run_id={}, status={:?}, failed={}, resource_skipped={}",
+                outcome.run_id, outcome.status, outcome.diff_summary.failed, outcome.resource_skipped
             );
         }
 
