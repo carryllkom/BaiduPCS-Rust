@@ -426,6 +426,8 @@ impl ShareSyncManager {
             sub.password.clone(),
             sub.include_paths.clone(),
             sub.exclude_patterns.clone(),
+            // 列目录抓快照与转存提交共用同一个全局风控限速器
+            self.rate_limiter.clone(),
         )
         .await
         {
