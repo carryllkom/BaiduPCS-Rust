@@ -66,6 +66,7 @@ fn map_share_err(e: ShareSyncError) -> ApiError {
     match e {
         ShareSyncError::SubscriptionNotFound(m) => err_not_found(&m),
         ShareSyncError::SubscriptionExists(m) => ApiError::Conflict(m),
+        ShareSyncError::AlreadyRunning(m) => ApiError::Conflict(m),
         ShareSyncError::ConfigError(m) => err_bad(&m),
         ShareSyncError::ShareLinkError(m) => err_bad(&m),
         ShareSyncError::FileSystemError(m) => err_bad(&m),
