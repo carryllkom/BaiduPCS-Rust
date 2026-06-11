@@ -476,6 +476,7 @@ impl ShareSyncManager {
             captured: captured.clone(),
             owner_uid,
             rate_limiter: Arc::clone(&self.rate_limiter),
+            subscription_id: sub.id.clone(),
         };
         let executor = ShareSyncExecutor::new(&sub, &self.persistence, &hooks);
         // v2 阶段 3:flag 开时走 tree 入口(顶层节点整体提交,目录 fs_id 直传);
@@ -653,6 +654,17 @@ struct ProductionHooks {
     owner_uid: u64,
     /// v2 阶段 6:出站请求前 acquire().await 走全局风控限速门
     rate_limiter: Arc<crate::share_sync::rate_limit::QuotaLimiter>,
+    /// 当前订阅 id，用于构造下载子任务的 `backup_config_id = "share-sync:{id}"`，
+    /// 实现任务隔离（隐藏 + 优先级 + 归属，详见 TransferTask::backup_config_id）。
+    subscription_id: String,
+}
+
+impl ProductionHooks {
+    /// 分享同步子任务的归属 id：`"share-sync:{订阅id}"`。
+    /// 永不与自动备份的 UUID 配置 id 冲突，故 `is_backup=true` 复用不会挂到自动备份。
+    fn share_sync_backup_config_id(&self) -> String {
+        format!("share-sync:{}", self.subscription_id)
+    }
 }
 
 #[async_trait]
@@ -698,6 +710,10 @@ impl ExecutorHooks for ProductionHooks {
                 name: item.name.clone(),
             }]),
             owner_uid_override: Some(Uid::new(self.owner_uid)),
+            // 分享同步内部任务：从「转存管理」隐藏 + 归属 share-sync:{订阅id}
+            // （下载段据此走自动备份同款 create_backup_task：隐藏 + 优先级 + 归属）。
+            is_internal: true,
+            backup_config_id: Some(self.share_sync_backup_config_id()),
         };
         let resp = tm
             .create_task(req)
@@ -804,10 +820,29 @@ impl ExecutorHooks for ProductionHooks {
         item: &ShareSnapshotItem,
         local_dir: &Path,
         strategy: ConflictStrategy,
+        transfer_netdisk_dir: Option<&str>,
     ) -> Result<String, ShareSyncError> {
         // v2 阶段 6:全局风控限速器
         self.rate_limiter.acquire().await;
-        let local_download_root = share_direct_download_root(local_dir, item)?;
+        // 本地同步模式分流：
+        // - 分享直下（transfer_netdisk_dir=None）：转存到临时目录，下载后清理（is_share_direct_download=true）。
+        // - 转存并下载（Some(网盘目录)）：转存到该网盘目录并保留，再下载（is_share_direct_download=false）。
+        // 两种模式的下载段都因 backup_config_id 走自动备份同款 create_backup_task。
+        let (sync_save_path, sync_local_download, sync_is_share_direct) = match transfer_netdisk_dir {
+            Some(netdisk_dir) => (
+                netdisk_dir.to_string(),
+                local_dir.to_string_lossy().to_string(),
+                false,
+            ),
+            None => {
+                let local_download_root = share_direct_download_root(local_dir, item)?;
+                (
+                    String::new(),
+                    local_download_root.to_string_lossy().to_string(),
+                    true,
+                )
+            }
+        };
         let tm = self.transfer_manager();
         use crate::transfer::manager::CreateTransferRequest;
         use crate::transfer::types::SharedFileInfo;
@@ -821,11 +856,11 @@ impl ExecutorHooks for ProductionHooks {
             share_url: share_url_for_captured(&self.captured),
             password: self.captured.password.clone(),
             randsk: self.captured.randsk.clone(),
-            save_path: String::new(),
+            save_path: sync_save_path,
             save_fs_id: 0,
             auto_download: Some(true),
-            local_download_path: Some(local_download_root.to_string_lossy().to_string()),
-            is_share_direct_download: true,
+            local_download_path: Some(sync_local_download),
+            is_share_direct_download: sync_is_share_direct,
             download_conflict_strategy: Some(download_conflict_strategy_for_share_sync(strategy)),
             selected_fs_ids: Some(vec![item.fs_id]),
             selected_files: Some(vec![SharedFileInfo {
@@ -836,6 +871,10 @@ impl ExecutorHooks for ProductionHooks {
                 name: item.name.clone(),
             }]),
             owner_uid_override: Some(Uid::new(self.owner_uid)),
+            // 分享同步内部任务：从「转存管理」隐藏 + 归属 share-sync:{订阅id}
+            // （下载段据此走自动备份同款 create_backup_task：隐藏 + 优先级 + 归属）。
+            is_internal: true,
+            backup_config_id: Some(self.share_sync_backup_config_id()),
         };
 
         let resp = tm
@@ -852,8 +891,8 @@ impl ExecutorHooks for ProductionHooks {
             .task_id
             .ok_or_else(|| ShareSyncError::DownloadError("TransferManager 未返回任务 ID".into()))?;
         info!(
-            "share-sync: share-direct download submitted task_id={} path={} local_root={:?}",
-            task_id, raw_path, local_download_root
+            "share-sync: download submitted task_id={} path={} share_direct={} netdisk_dir={:?}",
+            task_id, raw_path, sync_is_share_direct, transfer_netdisk_dir
         );
         Ok(task_id)
     }
@@ -1014,6 +1053,10 @@ impl ExecutorHooks for ProductionHooks {
             selected_fs_ids: Some(selected_fs_ids),
             selected_files: Some(selected_files),
             owner_uid_override: Some(Uid::new(self.owner_uid)),
+            // 分享同步内部任务：从「转存管理」隐藏 + 归属 share-sync:{订阅id}
+            // （下载段据此走自动备份同款 create_backup_task：隐藏 + 优先级 + 归属）。
+            is_internal: true,
+            backup_config_id: Some(self.share_sync_backup_config_id()),
         };
         let resp = tm
             .create_task(req)
@@ -1043,6 +1086,7 @@ impl ExecutorHooks for ProductionHooks {
         items: &[ShareSnapshotItem],
         local_dir: &Path,
         strategy: ConflictStrategy,
+        transfer_netdisk_dir: Option<&str>,
     ) -> Result<String, ShareSyncError> {
         if items.is_empty() {
             return Err(ShareSyncError::Internal(
@@ -1051,6 +1095,15 @@ impl ExecutorHooks for ProductionHooks {
         }
         // v2 阶段 6:全局风控限速器
         self.rate_limiter.acquire().await;
+        // 本地同步模式分流（batch）：见 submit_download 单文件版说明。
+        let (sync_save_path, sync_local_download, sync_is_share_direct) = match transfer_netdisk_dir {
+            Some(netdisk_dir) => (
+                netdisk_dir.to_string(),
+                local_dir.to_string_lossy().to_string(),
+                false,
+            ),
+            None => (String::new(), local_dir.to_string_lossy().to_string(), true),
+        };
         let tm = self.transfer_manager();
         use crate::transfer::manager::CreateTransferRequest;
         use crate::transfer::types::SharedFileInfo;
@@ -1084,15 +1137,19 @@ impl ExecutorHooks for ProductionHooks {
             // 走 is_share_direct_download=true 路径，save_path 在 transfer 里
             // 会被 temp_dir 强制覆盖——这是 transfer 的硬编码行为，不在 share-sync
             // 控制范围。最终落点是 `local_download_path`（自动下载阶段被消费）。
-            save_path: String::new(),
+            save_path: sync_save_path,
             save_fs_id: 0,
             auto_download: Some(true),
-            local_download_path: Some(local_dir.to_string_lossy().to_string()),
-            is_share_direct_download: true,
+            local_download_path: Some(sync_local_download),
+            is_share_direct_download: sync_is_share_direct,
             download_conflict_strategy: Some(download_conflict_strategy_for_share_sync(strategy)),
             selected_fs_ids: Some(selected_fs_ids),
             selected_files: Some(selected_files),
             owner_uid_override: Some(Uid::new(self.owner_uid)),
+            // 分享同步内部任务：从「转存管理」隐藏 + 归属 share-sync:{订阅id}
+            // （下载段据此走自动备份同款 create_backup_task：隐藏 + 优先级 + 归属）。
+            is_internal: true,
+            backup_config_id: Some(self.share_sync_backup_config_id()),
         };
 
         let resp = tm
@@ -1337,6 +1394,7 @@ mod tests {
             vec![SyncTarget::Local(LocalTarget {
                 local_path: std::env::temp_dir(),
                 conflict_strategy: None,
+                mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
             })],
         )
     }
@@ -1509,6 +1567,7 @@ mod tests {
             vec![SyncTarget::Local(LocalTarget {
                 local_path: dir.path().to_path_buf(),
                 conflict_strategy: None,
+                mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
             })],
         );
         let items = vec![
@@ -1536,6 +1595,7 @@ mod tests {
             vec![SyncTarget::Local(LocalTarget {
                 local_path: dir.path().to_path_buf(),
                 conflict_strategy: None,
+                mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
             })],
         );
         let item = ShareSnapshotItem::new("/nested/a.csv", "a.csv", 1, 4, false);

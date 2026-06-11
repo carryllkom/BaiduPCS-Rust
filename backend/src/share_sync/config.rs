@@ -23,6 +23,19 @@ pub struct NetdiskTarget {
     pub conflict_strategy: Option<ConflictStrategy>,
 }
 
+/// 本地同步模式：决定「同步到本地」时网盘侧如何留存。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalSyncMode {
+    /// 分享直下：转存到临时目录 → 下载到本地 → 清理临时目录（网盘不留存）。
+    /// 老订阅未带 `mode` 字段时默认此模式，保持既有行为不破。
+    #[default]
+    ShareDirect,
+    /// 转存并下载：转存到同订阅「网盘目标」的 remote_path（保留）→ 再下载到本地。
+    /// 要求该订阅已配置网盘目标，否则创建/保存时报错提示先添加网盘目标。
+    TransferAndDownload,
+}
+
 /// 本地目标
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocalTarget {
@@ -31,6 +44,9 @@ pub struct LocalTarget {
     /// 仅本目标生效的冲突策略
     #[serde(default)]
     pub conflict_strategy: Option<ConflictStrategy>,
+    /// 本地同步模式（默认 `ShareDirect`，老订阅反序列化不报错）。
+    #[serde(default)]
+    pub mode: LocalSyncMode,
 }
 
 /// 同步目标（一份订阅可同时配多个）
@@ -229,6 +245,24 @@ impl ShareSubscription {
                         .map_err(|e| format!("目标 #{} {}", idx + 1, e))?;
                 }
             }
+        }
+        // 「转存并下载」本地模式需复用同订阅「网盘目标」的 remote_path，
+        // 因此要求该订阅已配置网盘目标，否则提示先添加。
+        let has_transfer_and_download = self.targets.iter().any(|t| {
+            matches!(
+                t,
+                SyncTarget::Local(LocalTarget {
+                    mode: LocalSyncMode::TransferAndDownload,
+                    ..
+                })
+            )
+        });
+        let has_netdisk_target = self
+            .targets
+            .iter()
+            .any(|t| matches!(t, SyncTarget::Netdisk(_)));
+        if has_transfer_and_download && !has_netdisk_target {
+            return Err("「转存并下载」模式需复用网盘目标，请先为该订阅添加网盘目标".into());
         }
         if matches!(self.poll_config.mode, PollMode::Interval) {
             if self.poll_config.interval_secs < MIN_POLL_INTERVAL_SECS {
@@ -563,10 +597,12 @@ mod tests {
                 SyncTarget::Local(LocalTarget {
                     local_path: tmp.clone(),
                     conflict_strategy: None,
+                    mode: Default::default(),
                 }),
                 SyncTarget::Local(LocalTarget {
                     local_path: tmp,
                     conflict_strategy: None,
+                    mode: Default::default(),
                 }),
             ],
         );
@@ -590,6 +626,7 @@ mod tests {
                 SyncTarget::Local(LocalTarget {
                     local_path: tmp,
                     conflict_strategy: None,
+                    mode: Default::default(),
                 }),
             ],
         );
@@ -605,6 +642,7 @@ mod tests {
             vec![SyncTarget::Local(LocalTarget {
                 local_path: tmp,
                 conflict_strategy: None,
+                mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
             })],
         );
         sub.poll_config.interval_secs = 60;
@@ -620,6 +658,7 @@ mod tests {
             vec![SyncTarget::Local(LocalTarget {
                 local_path: PathBuf::from("relative/path"),
                 conflict_strategy: None,
+                mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
             })],
         );
         let err = sub.validate().unwrap_err();
@@ -637,6 +676,7 @@ mod tests {
             vec![SyncTarget::Local(LocalTarget {
                 local_path: tmp,
                 conflict_strategy: None,
+                mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
             })],
         );
         let err = sub.validate().unwrap_err();
@@ -684,6 +724,7 @@ mod tests {
         let t = SyncTarget::Local(LocalTarget {
             local_path: PathBuf::from("/x"),
             conflict_strategy: Some(ConflictStrategy::Skip),
+            mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
         });
         assert_eq!(
             t.effective_conflict_strategy(ConflictStrategy::Overwrite),

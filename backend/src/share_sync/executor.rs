@@ -120,6 +120,7 @@ pub trait ExecutorHooks: Send + Sync {
         item: &ShareSnapshotItem,
         local_dir: &Path,
         strategy: ConflictStrategy,
+        transfer_netdisk_dir: Option<&str>,
     ) -> Result<String, ShareSyncError>;
 
     /// 等待转存任务进入业务所需的终态
@@ -179,6 +180,7 @@ pub trait ExecutorHooks: Send + Sync {
         _items: &[ShareSnapshotItem],
         _local_dir: &Path,
         _strategy: ConflictStrategy,
+        _transfer_netdisk_dir: Option<&str>,
     ) -> Result<String, ShareSyncError> {
         Err(ShareSyncError::Internal(
             "submit_download_batch 未实现".to_string(),
@@ -216,6 +218,40 @@ impl<'a> ShareSyncExecutor<'a> {
             persistence,
             hooks,
         }
+    }
+
+    /// 计算「同步到本地」时转存子任务应落到的网盘目录。
+    ///
+    /// - `LocalSyncMode::ShareDirect`（分享直下）→ `None`：转存到临时目录后清理。
+    /// - `LocalSyncMode::TransferAndDownload`（转存并下载）→ `Some(网盘目录)`：
+    ///   复用同订阅「网盘目标」的 remote_path（与网盘目标同款落点），转存后保留、不清理。
+    ///   订阅未配网盘目标时退回 `None`（校验已在创建/保存阶段拦截该组合）。
+    fn transfer_netdisk_dir_for_local(
+        &self,
+        local: &LocalTarget,
+        item: &ShareSnapshotItem,
+    ) -> Option<String> {
+        use crate::share_sync::config::LocalSyncMode;
+        if local.mode != LocalSyncMode::TransferAndDownload {
+            return None;
+        }
+        self.subscription.targets.iter().find_map(|t| match t {
+            SyncTarget::Netdisk(net) => Some(netdisk_target_parent_dir(net, item)),
+            _ => None,
+        })
+    }
+
+    /// 同上，但用于 batch 下载：返回网盘目标的 remote_path 根目录
+    /// （与 `submit_transfer_batch` 落点一致，TransferManager 内部按 item 路径重建子目录）。
+    fn transfer_netdisk_root_for_local(&self, local: &LocalTarget) -> Option<String> {
+        use crate::share_sync::config::LocalSyncMode;
+        if local.mode != LocalSyncMode::TransferAndDownload {
+            return None;
+        }
+        self.subscription.targets.iter().find_map(|t| match t {
+            SyncTarget::Netdisk(net) => Some(net.remote_path.clone()),
+            _ => None,
+        })
     }
 
     /// 应用一次 diff 到所有目标
@@ -542,8 +578,14 @@ impl<'a> ShareSyncExecutor<'a> {
                             .await
                     }
                     SyncTarget::Local(t) => {
+                        let netdisk_dir = self.transfer_netdisk_root_for_local(t);
                         self.hooks
-                            .submit_download_batch(&items, &t.local_path, strategy)
+                            .submit_download_batch(
+                                &items,
+                                &t.local_path,
+                                strategy,
+                                netdisk_dir.as_deref(),
+                            )
                             .await
                     }
                 };
@@ -1137,8 +1179,14 @@ impl<'a> ShareSyncExecutor<'a> {
                     .await
             }
             SyncTarget::Local(t) => {
+                let netdisk_dir = self.transfer_netdisk_root_for_local(t);
                 self.hooks
-                    .submit_download_batch(&items_to_submit, &t.local_path, strategy)
+                    .submit_download_batch(
+                        &items_to_submit,
+                        &t.local_path,
+                        strategy,
+                        netdisk_dir.as_deref(),
+                    )
                     .await
             }
         };
@@ -1507,11 +1555,13 @@ impl<'a> ShareSyncExecutor<'a> {
                         .await
                         .map(|task_id| (task_id, false, RunItemStatus::Transferring))
                 }
-                SyncTarget::Local(t) => self
-                    .hooks
-                    .submit_download(item, &t.local_path, strategy)
-                    .await
-                    .map(|task_id| (task_id, true, RunItemStatus::Downloading)),
+                SyncTarget::Local(t) => {
+                    let netdisk_dir = self.transfer_netdisk_dir_for_local(t, item);
+                    self.hooks
+                        .submit_download(item, &t.local_path, strategy, netdisk_dir.as_deref())
+                        .await
+                        .map(|task_id| (task_id, true, RunItemStatus::Downloading))
+                }
             };
 
             match result {
@@ -2073,6 +2123,7 @@ fn _suppress_unused() {
         LocalTarget {
             local_path: PathBuf::new(),
             conflict_strategy: None,
+            mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
         },
     );
 }
@@ -2094,6 +2145,7 @@ mod tests {
             vec![SyncTarget::Local(LocalTarget {
                 local_path: PathBuf::from("/tmp/x"),
                 conflict_strategy: None,
+                mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
             })],
         )
     }
@@ -2192,6 +2244,7 @@ mod tests {
             item: &ShareSnapshotItem,
             dir: &Path,
             strategy: ConflictStrategy,
+            _transfer_netdisk_dir: Option<&str>,
         ) -> Result<String, ShareSyncError> {
             // 注入 submit_download 错误（按 fs_id 维度）
             if let Some(err) = self
@@ -2254,6 +2307,7 @@ mod tests {
             items: &[ShareSnapshotItem],
             dir: &Path,
             _strategy: ConflictStrategy,
+            _transfer_netdisk_dir: Option<&str>,
         ) -> Result<String, ShareSyncError> {
             if let Some(err) = self.batch_download_error.lock().unwrap().take() {
                 return Err(err);
@@ -2292,6 +2346,7 @@ mod tests {
             s.targets = vec![SyncTarget::Local(LocalTarget {
                 local_path: p.to_path_buf(),
                 conflict_strategy: None,
+                mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
             })];
             s
         };
@@ -2454,6 +2509,7 @@ mod tests {
                 SyncTarget::Local(LocalTarget {
                     local_path: dir.path().to_path_buf(),
                     conflict_strategy: None,
+                    mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
                 }),
             ];
             s
@@ -2489,6 +2545,7 @@ mod tests {
             s.targets = vec![SyncTarget::Local(LocalTarget {
                 local_path: p.to_path_buf(),
                 conflict_strategy: None,
+                mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
             })];
             s
         };
@@ -2530,6 +2587,7 @@ mod tests {
             s.targets = vec![SyncTarget::Local(LocalTarget {
                 local_path: p.to_path_buf(),
                 conflict_strategy: None,
+                mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
             })];
             s
         };
@@ -2555,6 +2613,7 @@ mod tests {
             s.targets = vec![SyncTarget::Local(LocalTarget {
                 local_path: dir.path().to_path_buf(),
                 conflict_strategy: None,
+                mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
             })];
             s.delete_missing = false;
             s
@@ -2583,6 +2642,7 @@ mod tests {
             s.targets = vec![SyncTarget::Local(LocalTarget {
                 local_path: p.to_path_buf(),
                 conflict_strategy: None,
+                mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
             })];
             s.delete_missing = true;
             s
@@ -2659,6 +2719,7 @@ mod tests {
             s.targets = vec![SyncTarget::Local(LocalTarget {
                 local_path: p.to_path_buf(),
                 conflict_strategy: None,
+                mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
             })];
             s
         };
@@ -2744,6 +2805,7 @@ mod tests {
             s.targets = vec![SyncTarget::Local(LocalTarget {
                 local_path: p.to_path_buf(),
                 conflict_strategy: None,
+                mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
             })];
             s
         };
@@ -2786,6 +2848,7 @@ mod tests {
             s.targets = vec![SyncTarget::Local(LocalTarget {
                 local_path: p.to_path_buf(),
                 conflict_strategy: None,
+                mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
             })];
             s
         };
@@ -2824,6 +2887,7 @@ mod tests {
             s.targets = vec![SyncTarget::Local(LocalTarget {
                 local_path: p.to_path_buf(),
                 conflict_strategy: None,
+                mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
             })];
             s
         };
@@ -2859,6 +2923,7 @@ mod tests {
             s.targets = vec![SyncTarget::Local(LocalTarget {
                 local_path: p.to_path_buf(),
                 conflict_strategy: None,
+                mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
             })];
             s
         };
@@ -2907,6 +2972,7 @@ mod tests {
         s.targets = vec![SyncTarget::Local(LocalTarget {
             local_path: p.to_path_buf(),
             conflict_strategy: None,
+            mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
         })];
         s.include_paths = vec!["/monthly".into()]; // 让 group_by_dir_root 把 /monthly/* 归一组
         let pm = ShareSyncPersistence::new(&db_dir.join("s.db")).unwrap();
@@ -2976,6 +3042,7 @@ mod tests {
         s.targets = vec![SyncTarget::Local(LocalTarget {
             local_path: p.to_path_buf(),
             conflict_strategy: None,
+            mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
         })];
         s.include_paths = vec!["/monthly".into()];
         let pm = ShareSyncPersistence::new(&db_dir.join("s.db")).unwrap();
