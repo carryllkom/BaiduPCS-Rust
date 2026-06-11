@@ -25,7 +25,7 @@
                   :total-count="subscriptions.length"
                   size="small"
                 />
-                <el-button type="primary" size="small" :icon="Plus" @click="openCreate">新增</el-button>
+                <el-button type="primary" size="small" :icon="Plus" @click="showTransferDialog = true">新增</el-button>
               </div>
             </div>
           </template>
@@ -178,17 +178,11 @@
     <!-- 创建/编辑对话框 -->
     <el-dialog
       v-model="dialogVisible"
-      :title="dialogMode === 'create' ? '新增订阅' : '编辑订阅'"
+      title="编辑订阅"
       width="640px"
       @close="resetForm"
     >
     <el-form :model="form" label-width="100px" :rules="formRules" ref="formRef">
-        <el-form-item
-          v-if="dialogMode === 'create' && authStore.hasMultipleAccounts"
-          label="归属账号"
-        >
-          <AccountSelect v-model="createOwnerUid" :include-all="false" />
-        </el-form-item>
         <el-form-item label="名称" prop="name">
           <el-input v-model="form.name" placeholder="如：剧集合集同步" />
         </el-form-item>
@@ -198,65 +192,13 @@
         <el-form-item label="提取码">
           <el-input v-model="form.password" placeholder="可选" maxlength="4" />
         </el-form-item>
-        <el-form-item label="同步路径">
-          <div class="path-editor">
-            <div v-if="form.include_paths.length === 0" class="path-empty">
-              不填则同步整个分享；填写后只同步勾选的子路径（前缀匹配）。
-            </div>
-            <div v-else class="path-tags">
-              <el-tag
-                v-for="(p, i) in form.include_paths"
-                :key="p + i"
-                closable
-                @close="form.include_paths.splice(i, 1)"
-                style="margin: 2px 4px 2px 0"
-              >{{ p }}</el-tag>
-            </div>
-            <div class="path-actions">
-              <el-input
-                v-model="pathInput"
-                size="small"
-                placeholder="手动输入路径，如 /剧集"
-                style="width: 220px; margin-right: 8px"
-                @keyup.enter="addPath"
-              >
-                <template #append>
-                  <el-button :icon="Plus" @click="addPath" />
-                </template>
-              </el-input>
-              <el-button
-                size="small"
-                :icon="FolderOpened"
-                :loading="loadingTree"
-                :disabled="!form.share_url"
-                @click="openTreePicker"
-              >从分享浏览</el-button>
-            </div>
-          </div>
-        </el-form-item>
-        <el-form-item label="排除规则">
-          <div class="path-editor">
-            <div class="path-tags">
-              <el-tag
-                v-for="(p, i) in form.exclude_patterns"
-                :key="p + i"
-                closable
-                type="info"
-                @close="form.exclude_patterns.splice(i, 1)"
-                style="margin: 2px 4px 2px 0"
-              >{{ p }}</el-tag>
-              <span v-if="form.exclude_patterns.length === 0" class="path-empty-inline">
-                支持 glob：*.tmp、sample.*、*广告* 等
-              </span>
-            </div>
-            <el-input
-              v-model="excludeInput"
-              size="small"
-              placeholder="添加排除规则，按回车确认"
-              style="width: 280px; margin-top: 4px"
-              @keyup.enter="addExclude"
-            />
-          </div>
+        <el-form-item label="同步范围">
+          <ShareIncludeExcludeEditor
+              :share-url="form.share_url"
+              :password="form.password || null"
+              v-model:include-paths="form.include_paths"
+              v-model:exclude-patterns="form.exclude_patterns"
+          />
         </el-form-item>
         <el-form-item label="冲突策略">
           <el-radio-group v-model="form.conflict_strategy">
@@ -327,70 +269,6 @@
       </template>
     </el-dialog>
 
-    <!-- 目录树选择对话框 -->
-    <el-dialog
-      v-model="treePickerVisible"
-      title="从分享中选择要同步的子路径"
-      width="640px"
-      :close-on-click-modal="false"
-      @open="loadTree"
-    >
-      <div class="tree-picker-toolbar">
-        <el-input
-          v-model="treeFilterText"
-          placeholder="搜索路径/文件名"
-          clearable
-          size="small"
-          style="width: 240px"
-        />
-        <el-checkbox v-model="treeCheckStrictly" style="margin-left: 12px">
-          父子独立选择
-        </el-checkbox>
-        <el-radio-group v-model="treeDepth" size="small" style="margin-left: 12px">
-          <el-radio-button :value="1">仅根</el-radio-button>
-          <el-radio-button :value="2">2 层</el-radio-button>
-          <el-radio-button :value="3">3 层</el-radio-button>
-        </el-radio-group>
-        <el-button size="small" :loading="loadingTree" :icon="Refresh" style="margin-left: 12px" @click="loadTree">刷新</el-button>
-      </div>
-      <el-alert
-        v-if="treeError"
-        :title="treeError"
-        type="error"
-        :closable="false"
-        show-icon
-        style="margin-bottom: 8px"
-      />
-      <el-tree
-        ref="treeRef"
-        :data="treeData"
-        :props="treeProps"
-        node-key="path"
-        show-checkbox
-        :check-strictly="treeCheckStrictly"
-        :default-checked-keys="form.include_paths"
-        :filter-node-method="filterTreeNode"
-        :default-expand-all="false"
-        v-loading="loadingTree"
-        empty-text="暂无内容或分享已失效"
-        style="max-height: 420px; overflow: auto"
-      >
-        <template #default="{ node, data }">
-          <span class="tree-node">
-            <el-icon v-if="data.is_dir"><FolderOpened /></el-icon>
-            <el-icon v-else><Document /></el-icon>
-            <span style="margin-left: 4px">{{ data.name }}</span>
-            <span v-if="!data.is_dir" class="tree-size">{{ formatSize(data.size) }}</span>
-          </span>
-        </template>
-      </el-tree>
-      <template #footer>
-        <span class="tree-picker-hint">已选 {{ form.include_paths.length }} 个路径</span>
-        <el-button @click="treePickerVisible = false">取消</el-button>
-        <el-button type="primary" @click="confirmTreePicker">确定</el-button>
-      </template>
-    </el-dialog>
-
     <!-- 运行详情对话框 -->
     <el-dialog v-model="runDialogVisible" title="运行详情" width="700px">
       <div v-if="currentRun" class="run-detail">
@@ -438,49 +316,49 @@
         @confirm-download="handleDirConfirm"
         @use-default="handleDirUseDefault"
     />
+
+    <!-- 创建入口：复用转存对话框（默认勾“保持同步”→ 创建订阅） -->
+    <TransferDialog v-model="showTransferDialog" :default-keep-sync="true" @sync-created="onSyncCreated" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
-import { ElMessage, ElMessageBox, type ElTree } from 'element-plus'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type { AxiosError } from 'axios'
 import { useAuthStore } from '@/stores/auth'
 import AccountFilter from '@/components/AccountFilter.vue'
 import AccountBadge from '@/components/AccountBadge.vue'
-import AccountSelect from '@/components/AccountSelect.vue'
+import TransferDialog from '@/components/TransferDialog.vue'
+import ShareIncludeExcludeEditor from '@/components/ShareIncludeExcludeEditor.vue'
 import { FilePickerModal } from '@/components/FilePicker'
 import { getConfig, updateRecentDirDebounced, setDefaultDownloadDir, type DownloadConfig } from '@/api/config'
 import {
   Plus, Edit, Delete, Refresh, ArrowRight, Link,
-  FolderOpened, Document, VideoPause, VideoPlay,
+  FolderOpened, VideoPause, VideoPlay,
 } from '@element-plus/icons-vue'
 import {
   type ShareSubscription,
   type SyncTarget,
   type NetdiskTarget,
   type LocalTarget,
-  type CreateShareSubscriptionRequest,
   type UpdateShareSubscriptionRequest,
   type RunRecord,
   type RunDetail,
   type ConflictStrategy,
   type PollConfig,
-  type TreeNode,
   type ShareSyncWsEvent,
-  listSubscriptions, createSubscription, updateSubscription,
+  listSubscriptions, updateSubscription,
   deleteSubscription, setSubscriptionEnabled, triggerSubscription, listRuns, getRun,
-  previewTree,
 } from '@/api/shareSync'
 import { getWebSocketClient, connectWebSocket } from '@/utils/websocket'
 
 const subscriptions = ref<ShareSubscription[]>([])
 const selected = ref<ShareSubscription | null>(null)
 
-// 多账号：账号过滤（null=全部账号）+ 新建时归属账号
+// 多账号：账号过滤（null=全部账号）
 const authStore = useAuthStore()
 const ownerFilter = ref<number | null>(null)
-const createOwnerUid = ref<number | null>(null)
 
 // 按账号过滤后的订阅列表（与 transfer/autobackup 一致：null 显示全部）
 const displayedSubscriptions = computed(() => {
@@ -505,7 +383,8 @@ const dirPickerVisible = ref(false)
 const dirPickerTargetIndex = ref<number>(-1)
 
 const dialogVisible = ref(false)
-const dialogMode = ref<'create' | 'edit'>('create')
+// 创建入口：复用转存对话框
+const showTransferDialog = ref(false)
 const runDialogVisible = ref(false)
 const saving = ref(false)
 const triggering = ref(false)
@@ -513,27 +392,6 @@ const formRef = ref()
 const scheduledTime = ref<string>('03:00')
 
 // 路径编辑
-const pathInput = ref('')
-const excludeInput = ref('')
-
-// 目录树选择
-const treePickerVisible = ref(false)
-const treeData = ref<TreeNode[]>([])
-const treeRef = ref<InstanceType<typeof ElTree>>()
-const treeProps = {
-  children: 'children',
-  label: 'name',
-  isLeaf: (d: TreeNode) => !d.is_dir,
-} as const
-const treeFilterText = ref('')
-const treeCheckStrictly = ref(false)
-const treeDepth = ref<number>(2)
-const loadingTree = ref(false)
-const treeError = ref('')
-watch(treeFilterText, (v) => {
-  treeRef.value?.filter(v)
-})
-
 function createDefaultTarget(): SyncTarget {
   return { kind: 'local', local_path: '', conflict_strategy: null }
 }
@@ -663,13 +521,9 @@ async function loadRuns(id: string) {
   }
 }
 
-function openCreate() {
-  form.value = defaultForm()
-  scheduledTime.value = '03:00'
-  dialogMode.value = 'create'
-  // 新建归属账号默认：当前过滤账号 → 当前活跃账号
-  createOwnerUid.value = ownerFilter.value ?? authStore.activeUid
-  dialogVisible.value = true
+// 转存对话框创建订阅后回调（WS 事件也会刷新，这里显式刷一次更可靠）
+function onSyncCreated() {
+  refresh()
 }
 
 function openEdit() {
@@ -694,7 +548,6 @@ function openEdit() {
     form.value.poll_config.schedule_hour = null
     form.value.poll_config.schedule_minute = null
   }
-  dialogMode.value = 'edit'
   dialogVisible.value = true
 }
 
@@ -725,23 +578,7 @@ async function saveForm() {
   }
   saving.value = true
   try {
-    if (dialogMode.value === 'create') {
-      const req: CreateShareSubscriptionRequest = {
-        name: form.value.name,
-        share_url: form.value.share_url,
-        password: form.value.password || null,
-        include_paths: form.value.include_paths,
-        exclude_patterns: form.value.exclude_patterns,
-        targets: form.value.targets,
-        conflict_strategy: form.value.conflict_strategy,
-        delete_missing: form.value.delete_missing,
-        poll_config: form.value.poll_config,
-        // 多账号：显式归属账号（缺省由后端回退到当前活跃账号）
-        owner_uid: createOwnerUid.value ?? undefined,
-      }
-      await createSubscription(req)
-      ElMessage.success('已创建订阅')
-    } else if (selected.value) {
+    if (selected.value) {
       const req: UpdateShareSubscriptionRequest = {
         name: form.value.name,
         share_url: form.value.share_url,
@@ -1000,98 +837,6 @@ function handleDirUseDefault() {
 }
 
 // ==================== 路径编辑 / 树选择 ====================
-
-function addPath() {
-  const v = normalizePath(pathInput.value)
-  if (!v) return
-  if (!form.value.include_paths.includes(v)) {
-    form.value.include_paths.push(v)
-  }
-  pathInput.value = ''
-}
-
-function addExclude() {
-  const v = excludeInput.value.trim()
-  if (!v) return
-  if (!form.value.exclude_patterns.includes(v)) {
-    form.value.exclude_patterns.push(v)
-  }
-  excludeInput.value = ''
-}
-
-function openTreePicker() {
-  if (!form.value.share_url) {
-    ElMessage.warning('请先填写分享链接')
-    return
-  }
-  treeError.value = ''
-  treePickerVisible.value = true
-}
-
-async function loadTree() {
-  loadingTree.value = true
-  treeError.value = ''
-  try {
-    const resp = await previewTree(
-      form.value.share_url,
-      form.value.password || null,
-      treeDepth.value
-    )
-    treeData.value = resp.root || []
-    // 重新设置已选
-    await nextTick()
-    form.value.include_paths.forEach((p: string) => {
-      treeRef.value?.setChecked?.(p, true, false)
-    })
-  } catch (e) {
-    const ax = e as AxiosError<{ message?: string; error?: string }>
-    treeError.value =
-      ax?.response?.data?.message ||
-      ax?.response?.data?.error ||
-      (e as Error)?.message ||
-      '加载目录树失败'
-  } finally {
-    loadingTree.value = false
-  }
-}
-
-function confirmTreePicker() {
-  const checked = treeRef.value?.getCheckedNodes?.(false, false) || []
-  const halfChecked = treeRef.value?.getHalfCheckedNodes?.() || []
-  const all = [...checked, ...halfChecked]
-  // 按照树节点路径回填，先标准化再去重
-  const nextInclude: string[] = []
-  const uniq = new Set<string>()
-  all
-    .map((n) => (n as unknown as TreeNode).path)
-    .map((p: string) => normalizePath(p))
-    .filter((p: string) => p.length > 0)
-    .forEach((p: string) => {
-      if (!uniq.has(p)) {
-        uniq.add(p)
-        nextInclude.push(p)
-      }
-    })
-  form.value.include_paths = nextInclude
-  treePickerVisible.value = false
-}
-
-function filterTreeNode(query: string, data: TreeNode) {
-  if (!query) return true
-  return (data.name as string)?.toLowerCase?.().includes(query.toLowerCase())
-}
-
-function formatSize(n: number): string {
-  if (!n) return ''
-  const u = ['B', 'KB', 'MB', 'GB', 'TB']
-  let i = 0
-  let v = n
-  while (v >= 1024 && i < u.length - 1) {
-    v /= 1024
-    i++
-  }
-  return v.toFixed(v >= 100 || i === 0 ? 0 : 1) + ' ' + u[i]
-}
 
 function onScheduledChange(val: string | null) {
   if (form.value.poll_config.mode !== 'scheduled') {
