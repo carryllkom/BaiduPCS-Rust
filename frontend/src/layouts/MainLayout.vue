@@ -300,6 +300,7 @@ const pageTitle = computed(() => {
     '/downloads': '下载管理',
     '/uploads': '上传管理',
     '/transfers': '转存管理',
+    '/share-sync': '分享同步',
     '/autobackup': '自动备份',
     '/cloud-dl': '离线下载',
     '/shares': '分享管理',

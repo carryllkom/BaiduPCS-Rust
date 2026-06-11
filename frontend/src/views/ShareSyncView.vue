@@ -1,9 +1,5 @@
 <template>
   <div class="share-sync-view">
-    <div class="page-header">
-      <h2 class="page-title">分享同步</h2>
-    </div>
-
     <p class="page-desc">
       订阅第三方分享链接，自动监听内容更新并按"覆盖式 / 新版本式 / 跳过"策略把变更同步到网盘目录或本地目录。
     </p>
@@ -55,8 +51,8 @@
         </el-card>
       </el-col>
 
-      <!-- 中间：详情 + 操作 -->
-      <el-col :xs="24" :md="10">
+      <!-- 中间：详情 + 操作（未选中时占满右侧剩余宽度，避免出现窄的空白第二栏） -->
+      <el-col :xs="24" :md="selected ? 10 : 16">
         <el-card v-if="selected" shadow="hover" class="detail-card">
           <template #header>
             <div class="card-header">
@@ -159,9 +155,9 @@
         </el-card>
       </el-col>
 
-      <!-- 右侧：运行历史 -->
-      <el-col :xs="24" :md="6">
-        <el-card v-if="selected" shadow="hover" class="runs-card">
+      <!-- 右侧：运行历史（仅选中订阅时显示） -->
+      <el-col v-if="selected" :xs="24" :md="6">
+        <el-card shadow="hover" class="runs-card">
           <template #header>
             <span>运行历史</span>
           </template>
@@ -1034,16 +1030,14 @@ onUnmounted(() => {
 <style scoped lang="scss">
 .share-sync-view {
   padding: 16px;
-  .page-header { margin-bottom: 12px; }
-  .page-title { font-weight: 600; font-size: 18px; margin: 0; }
-  .page-desc { color: #909399; font-size: 13px; margin-bottom: 16px; }
+  .page-desc { color: #909399; font-size: 13px; margin: 0 0 16px; }
 }
 
-// 三列卡片填充视口高度，避免内容少时卡片过矮、右侧大片留白
+// 卡片填充视口高度，避免内容少时卡片过矮、右侧大片留白
 .list-card,
 .detail-card,
 .runs-card {
-  min-height: calc(100vh - 200px);
+  min-height: calc(100vh - 180px);
 }
 .placeholder-card {
   display: flex;
