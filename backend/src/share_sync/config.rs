@@ -196,6 +196,24 @@ impl ShareSubscription {
         if self.targets.is_empty() {
             return Err("至少需要配置一个同步目标".into());
         }
+        // 目标模型收窄：最多 1 个网盘目标 + 1 个本地目标（可共存=转存直下）。
+        // 多个本地目标会让同一文件重复下载到多个目录、浪费带宽；多个网盘目标也无清晰需求。
+        let netdisk_count = self
+            .targets
+            .iter()
+            .filter(|t| matches!(t, SyncTarget::Netdisk(_)))
+            .count();
+        let local_count = self
+            .targets
+            .iter()
+            .filter(|t| matches!(t, SyncTarget::Local(_)))
+            .count();
+        if netdisk_count > 1 {
+            return Err("最多只能配置 1 个网盘目标".into());
+        }
+        if local_count > 1 {
+            return Err("最多只能配置 1 个本地目标".into());
+        }
         for (idx, target) in self.targets.iter().enumerate() {
             match target {
                 SyncTarget::Netdisk(t) => {
@@ -511,6 +529,71 @@ mod tests {
         );
         sub.targets.clear();
         assert!(sub.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_multiple_netdisk_targets() {
+        let sub = ShareSubscription::new(
+            "t".into(),
+            "https://pan.baidu.com/s/1y7CluAbCdEfGh".into(),
+            vec![
+                SyncTarget::Netdisk(NetdiskTarget {
+                    remote_path: "/a".into(),
+                    save_fs_id: 0,
+                    conflict_strategy: None,
+                }),
+                SyncTarget::Netdisk(NetdiskTarget {
+                    remote_path: "/b".into(),
+                    save_fs_id: 0,
+                    conflict_strategy: None,
+                }),
+            ],
+        );
+        let err = sub.validate().unwrap_err();
+        assert!(err.contains("最多只能配置 1 个网盘目标"), "实际错误: {}", err);
+    }
+
+    #[test]
+    fn test_validate_rejects_multiple_local_targets() {
+        let tmp = std::env::temp_dir();
+        let sub = ShareSubscription::new(
+            "t".into(),
+            "https://pan.baidu.com/s/1y7CluAbCdEfGh".into(),
+            vec![
+                SyncTarget::Local(LocalTarget {
+                    local_path: tmp.clone(),
+                    conflict_strategy: None,
+                }),
+                SyncTarget::Local(LocalTarget {
+                    local_path: tmp,
+                    conflict_strategy: None,
+                }),
+            ],
+        );
+        let err = sub.validate().unwrap_err();
+        assert!(err.contains("最多只能配置 1 个本地目标"), "实际错误: {}", err);
+    }
+
+    #[test]
+    fn test_validate_allows_one_netdisk_plus_one_local() {
+        // 网盘 + 本地共存（转存直下）应当合法
+        let tmp = std::env::temp_dir();
+        let sub = ShareSubscription::new(
+            "t".into(),
+            "https://pan.baidu.com/s/1y7CluAbCdEfGh".into(),
+            vec![
+                SyncTarget::Netdisk(NetdiskTarget {
+                    remote_path: "/a".into(),
+                    save_fs_id: 0,
+                    conflict_strategy: None,
+                }),
+                SyncTarget::Local(LocalTarget {
+                    local_path: tmp,
+                    conflict_strategy: None,
+                }),
+            ],
+        );
+        assert!(sub.validate().is_ok());
     }
 
     #[test]

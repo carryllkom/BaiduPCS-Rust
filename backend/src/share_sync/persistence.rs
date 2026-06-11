@@ -24,17 +24,23 @@ pub fn normalize_pagination(page: Option<usize>, page_size: Option<usize>) -> (u
     (p, ps)
 }
 
-/// 给 `share_sync_run_items(run_id, path)` 建 UNIQUE 索引。
+/// 给 `share_sync_run_items(run_id, path, target)` 建 UNIQUE 索引。
 ///
-/// 老库可能积累过重复行 — quota 退化、并发批量重试都会把同一 (run_id, path)
-/// 插多次。`CREATE UNIQUE INDEX` 在已有重复时会直接报错把启动卡死,所以这里
-/// 先按 `(run_id, path)` 去重(保留最大 id, 即最近一次写入,状态最新), 再建索引。
+/// 唯一键含 `target`（target_kind：netdisk / local）：一个文件在"网盘 + 本地"
+/// 共存的订阅里会产生两条动作（转存到网盘 + 下载到本地），若只按 (run_id, path)
+/// 唯一，两条会互相覆盖，运行详情里的 target/status/task_id 不可信。加上 target
+/// 后两条独立存在、各自可查。
+///
+/// 老库可能积累过重复行 — quota 退化、并发批量重试都会把同一三元组插多次；早期
+/// 版本还建过 `(run_id, path)` 的唯一索引。`CREATE UNIQUE INDEX` 在已有重复时会
+/// 直接报错把启动卡死,所以这里先按 `(run_id, path, target)` 去重(保留最大 id,
+/// 即最近一次写入,状态最新), 删掉旧的二元唯一索引, 再建三元索引。
 fn ensure_run_items_unique_index(conn: &Connection) -> Result<(), ShareSyncError> {
-    // 已有则直接返回(幂等);避免对大表反复跑 DELETE 扫描
+    // 新三元索引已存在则直接返回(幂等);避免对大表反复跑 DELETE 扫描
     let exists: bool = conn
         .query_row(
             "SELECT 1 FROM sqlite_master
-             WHERE type = 'index' AND name = 'idx_share_run_items_run_path'",
+             WHERE type = 'index' AND name = 'idx_share_run_items_run_path_target'",
             [],
             |row| row.get::<_, i64>(0).map(|_| true),
         )
@@ -43,23 +49,25 @@ fn ensure_run_items_unique_index(conn: &Connection) -> Result<(), ShareSyncError
     if exists {
         return Ok(());
     }
-    // 删除"同一 (run_id, path) 的重复行,只保留 id 最大的那条"
+    // 删除"同一 (run_id, path, target) 的重复行,只保留 id 最大的那条"
     let deleted = conn.execute(
         "DELETE FROM share_sync_run_items
          WHERE id NOT IN (
-             SELECT MAX(id) FROM share_sync_run_items GROUP BY run_id, path
+             SELECT MAX(id) FROM share_sync_run_items GROUP BY run_id, path, target
          )",
         [],
     )?;
     if deleted > 0 {
         warn!(
-            "share_sync schema 迁移: 去除 {} 条 (run_id, path) 重复 run_item",
+            "share_sync schema 迁移: 去除 {} 条 (run_id, path, target) 重复 run_item",
             deleted
         );
     }
+    // 旧的二元唯一索引（早期版本建的）会阻止"同 path 不同 target"两条共存,必须删掉
+    conn.execute("DROP INDEX IF EXISTS idx_share_run_items_run_path", [])?;
     conn.execute(
-        "CREATE UNIQUE INDEX idx_share_run_items_run_path
-         ON share_sync_run_items(run_id, path)",
+        "CREATE UNIQUE INDEX idx_share_run_items_run_path_target
+         ON share_sync_run_items(run_id, path, target)",
         [],
     )?;
     Ok(())
@@ -567,11 +575,12 @@ impl ShareSyncPersistence {
     /// 当前主要给 quota / local_disk_full 早停场景用，记录"skip_due_to_quota_full"
     /// 之类的语义化原因。普通成功 / 正常失败的 item 传 `None`。
     ///
-    /// v2: 内部走 `INSERT ... ON CONFLICT(run_id, path) DO UPDATE ... RETURNING id`,
-    /// 同一 (run_id, path) 重复调用会**覆盖**前一次的所有字段并返回原 row id。
+    /// v2: 内部走 `INSERT ... ON CONFLICT(run_id, path, target) DO UPDATE ... RETURNING id`,
+    /// 同一 (run_id, path, target) 重复调用会**覆盖**前一次的所有字段并返回原 row id。
     /// 这是 quota 退化 / 二分递归 / 并发批量重试场景下"状态以最后一次写入为准"
-    /// 的关键 — 老实现是裸 INSERT 会塞重复行,(run_id, path) 又没有 UNIQUE 约束,
-    /// 列表 API 拉出来会有多份。
+    /// 的关键 — 老实现是裸 INSERT 会塞重复行,没有 UNIQUE 约束, 列表 API 拉出来会
+    /// 有多份。唯一键含 `target` 是为了让"网盘 + 本地"共存订阅里同一文件的两条动作
+    /// （转存 / 下载）各自独立、互不覆盖。
     #[allow(clippy::too_many_arguments)]
     pub fn add_run_item(
         &self,
@@ -590,7 +599,7 @@ impl ShareSyncPersistence {
             "INSERT INTO share_sync_run_items
              (run_id, path, action, target, transfer_task_id, download_task_id, status, versioned_old_path, reason)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(run_id, path) DO UPDATE SET
+             ON CONFLICT(run_id, path, target) DO UPDATE SET
                  action = excluded.action,
                  target = excluded.target,
                  transfer_task_id = COALESCE(excluded.transfer_task_id, share_sync_run_items.transfer_task_id),
@@ -1175,6 +1184,51 @@ mod tests {
         assert_eq!(items[0].download_task_id.as_deref(), Some("dl-1"));
         assert_eq!(items[0].versioned_old_path.as_deref(), Some("/old.bak"));
         assert_eq!(items[0].reason.as_deref(), Some("first_reason"));
+    }
+
+    /// v2: 同一 (run_id, path) 但不同 target（网盘 + 本地）应当各存一条,互不覆盖。
+    /// 唯一键是 (run_id, path, target),这是"网盘 + 本地"共存订阅运行详情可信的前提。
+    #[test]
+    fn test_add_run_item_netdisk_and_local_coexist() {
+        let (_dir, mgr) = fresh();
+        let s = sub("a");
+        mgr.upsert_subscription(&s).unwrap();
+        mgr.start_run("run-d", &s.id, 1000).unwrap();
+        let id_net = mgr
+            .add_run_item(
+                "run-d",
+                "/movie.mkv",
+                SyncAction::Added,
+                TargetKind::Netdisk,
+                Some("tx-net"),
+                None,
+                RunItemStatus::Completed,
+                None,
+                None,
+            )
+            .unwrap();
+        let id_local = mgr
+            .add_run_item(
+                "run-d",
+                "/movie.mkv",
+                SyncAction::Added,
+                TargetKind::Local,
+                None,
+                Some("dl-local"),
+                RunItemStatus::Transferring,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_ne!(id_net, id_local, "不同 target 应当是两条独立 row");
+        let items = mgr.list_run_items("run-d").unwrap();
+        assert_eq!(items.len(), 2, "网盘 + 本地各一条,不互相覆盖");
+        let net = items.iter().find(|i| i.target == "netdisk").unwrap();
+        let local = items.iter().find(|i| i.target == "local").unwrap();
+        assert_eq!(net.transfer_task_id.as_deref(), Some("tx-net"));
+        assert_eq!(net.status, "completed");
+        assert_eq!(local.download_task_id.as_deref(), Some("dl-local"));
+        assert_eq!(local.status, "transferring");
     }
 
     /// v2: mark_stale_runs_failed — 把 status='running' 且 started_at 超阈值的 run

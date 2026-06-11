@@ -210,8 +210,8 @@
         <el-form-item label="目标">
           <div v-for="(t, i) in form.targets" :key="i" class="target-form-row">
             <el-select v-model="t.kind" style="width: 110px" @change="onTargetKindChange(t)">
-              <el-option value="netdisk" label="网盘" />
-              <el-option value="local" label="本地" />
+              <el-option value="netdisk" label="网盘" :disabled="kindUsedByOther(i, 'netdisk')" />
+              <el-option value="local" label="本地" :disabled="kindUsedByOther(i, 'local')" />
             </el-select>
             <el-input
               v-if="t.kind === 'netdisk'"
@@ -235,9 +235,10 @@
             </el-button>
             <el-button :icon="Delete" link type="danger" @click="form.targets.splice(i, 1)" style="margin-left: 4px" />
           </div>
-          <el-button :icon="Plus" link @click="form.targets.push(createDefaultTarget())">
+          <el-button :icon="Plus" link :disabled="!canAddTarget" @click="addTarget()">
             添加目标
           </el-button>
+          <span class="target-tip">最多 1 个网盘目标 + 1 个本地目标（可共存=转存直下）</span>
         </el-form-item>
         <el-form-item label="轮询">
           <el-radio-group v-model="form.poll_config.mode">
@@ -394,6 +395,38 @@ const scheduledTime = ref<string>('03:00')
 // 路径编辑
 function createDefaultTarget(): SyncTarget {
   return { kind: 'local', local_path: '', conflict_strategy: null }
+}
+
+// 目标模型收窄：最多 1 个网盘 + 1 个本地（可共存=转存直下）。
+function targetKindCounts(): { netdisk: number; local: number } {
+  let netdisk = 0
+  let local = 0
+  for (const t of form.value.targets) {
+    if (t.kind === 'netdisk') netdisk++
+    else if (t.kind === 'local') local++
+  }
+  return { netdisk, local }
+}
+
+// 某个类型是否已被「其它」目标占用（用于禁用下拉里的重复类型，避免两个网盘/两个本地）
+function kindUsedByOther(index: number, kind: 'netdisk' | 'local'): boolean {
+  return form.value.targets.some((t, i) => i !== index && t.kind === kind)
+}
+
+// 还能不能再加目标：网盘和本地各自上限 1
+const canAddTarget = computed(() => {
+  const { netdisk, local } = targetKindCounts()
+  return netdisk < 1 || local < 1
+})
+
+// 加目标时自动选当前缺失的类型：没有网盘先补网盘，否则补本地
+function addTarget() {
+  const { netdisk } = targetKindCounts()
+  if (netdisk < 1) {
+    form.value.targets.push({ kind: 'netdisk', remote_path: '/', save_fs_id: 0, conflict_strategy: null })
+  } else {
+    form.value.targets.push({ kind: 'local', local_path: '', conflict_strategy: null })
+  }
 }
 
 const defaultForm = (): {
@@ -605,6 +638,17 @@ async function saveForm() {
 function validateForm(): boolean {
   if (form.value.targets.length === 0) {
     ElMessage.error('请至少配置一个同步目标')
+    return false
+  }
+
+  // 目标模型收窄：最多 1 网盘 + 1 本地（与后端 validate 一致）
+  const { netdisk, local } = targetKindCounts()
+  if (netdisk > 1) {
+    ElMessage.error('最多只能配置 1 个网盘目标')
+    return false
+  }
+  if (local > 1) {
+    ElMessage.error('最多只能配置 1 个本地目标')
     return false
   }
 
@@ -998,6 +1042,7 @@ onUnmounted(() => {
 
 .target-line { margin: 4px 0; }
 .target-form-row { display: flex; align-items: center; margin-bottom: 8px; }
+.target-tip { margin-left: 8px; font-size: 12px; color: #909399; }
 
 .run-item { cursor: pointer; &:hover { color: #409eff; } }
 .run-stats { font-size: 12px; color: #909399; margin-top: 2px; }
