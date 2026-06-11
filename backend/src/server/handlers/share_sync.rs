@@ -388,6 +388,18 @@ pub async fn preview_tree(
             None => return Err(err_bad("无活跃账号且未指定 owner_uid，请先登录百度账号")),
         },
     };
+    // 启动期只急切注入「活跃账号」client，非活跃账号是懒加载的；活跃账号预热也可能
+    // 因网络/代理短暂失败而未入池。故取 client 前先 `ensure_client_for_uid` 兜底懒加载
+    // （用持久化 cookie 构造，不联网），对齐 cloud_dl/accounts handler 的做法，避免
+    // 「账号已登录却报未登录」的误报。仅当账号确实不在 AccountManager（需登录）或
+    // 凭证失效导致构造失败时才报错。
+    if let Err(e) = state.ensure_client_for_uid(owner_uid).await {
+        return Err(err_bad(&format!(
+            "订阅所属账号 uid={} 不可用（未登录或登录已失效），请登录该账号后再预览目录树：{}",
+            owner_uid.raw(),
+            e
+        )));
+    }
     let client = state
         .client_pool
         .read()
