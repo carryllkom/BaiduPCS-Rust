@@ -379,13 +379,15 @@ pub async fn preview_tree(
     let depth = req.depth.clamp(1, 4);
 
     // 按订阅所属账号路由网盘 client（对齐 AutoBackup）：
-    // owner_uid 显式传入 → 用该账号；否则回退当前 active 账号（转存对话框创建场景）。
-    // 该账号未登录 → 返回明确错误，前端据此禁用预览并提示登录该账号，不要求先切号。
+    // owner_uid 显式传入 = 编辑既有订阅（按订阅自己的账号路由）；未传 = 新建场景，
+    // 用当前 active 账号预览（“新建就是用我当前账号”）。据此区分报错措辞，新建时不提
+    // “订阅所属账号”这种令人困惑的说法。
+    let is_explicit_owner = req.owner_uid.is_some();
     let owner_uid = match req.owner_uid {
         Some(raw) => crate::auth::Uid::new(raw),
         None => match *state.active_uid.read().await {
             Some(active) => active,
-            None => return Err(err_bad("无活跃账号且未指定 owner_uid，请先登录百度账号")),
+            None => return Err(err_bad("当前无已登录百度账号，请先登录后再预览目录树")),
         },
     };
     // 启动期只急切注入「活跃账号」client，非活跃账号是懒加载的；活跃账号预热也可能
@@ -393,24 +395,26 @@ pub async fn preview_tree(
     // （用持久化 cookie 构造，不联网），对齐 cloud_dl/accounts handler 的做法，避免
     // 「账号已登录却报未登录」的误报。仅当账号确实不在 AccountManager（需登录）或
     // 凭证失效导致构造失败时才报错。
+    let unavailable_msg = |uid: u64, detail: String| {
+        if is_explicit_owner {
+            err_bad(&format!(
+                "订阅所属账号 uid={uid} 不可用（未登录或登录已失效），请登录该账号后再预览目录树：{detail}"
+            ))
+        } else {
+            err_bad(&format!(
+                "当前账号 uid={uid} 不可用（未登录或登录已失效），请重新登录后再预览目录树：{detail}"
+            ))
+        }
+    };
     if let Err(e) = state.ensure_client_for_uid(owner_uid).await {
-        return Err(err_bad(&format!(
-            "订阅所属账号 uid={} 不可用（未登录或登录已失效），请登录该账号后再预览目录树：{}",
-            owner_uid.raw(),
-            e
-        )));
+        return Err(unavailable_msg(owner_uid.raw(), e.to_string()));
     }
     let client = state
         .client_pool
         .read()
         .await
         .get_client(owner_uid)
-        .ok_or_else(|| {
-            err_bad(&format!(
-                "订阅所属账号 uid={} 未登录，无法预览目录树，请先登录该账号",
-                owner_uid.raw()
-            ))
-        })?;
+        .ok_or_else(|| unavailable_msg(owner_uid.raw(), "client 未入池".to_string()))?;
 
     // 解析链接
     let share_link = client
