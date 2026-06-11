@@ -97,9 +97,22 @@
                 v-model:exclude-patterns="form.excludePatterns"
             />
           </el-form-item>
+          <el-form-item label="同步到本地">
+            <el-switch v-model="form.syncToLocal" />
+            <span class="switch-tip">同时把分享内容同步到本地目录（与上方网盘目标并存）</span>
+          </el-form-item>
+          <el-form-item v-if="form.syncToLocal" label="本地目录">
+            <div class="local-target-row">
+              <el-input
+                  v-model="form.syncLocalPath"
+                  placeholder="本地绝对路径，如 D:\share-sync 或 /data/share-sync"
+              />
+              <el-button @click="showSyncLocalPicker = true">选择目录</el-button>
+            </div>
+          </el-form-item>
           <div class="sync-hint">
             不选同步路径＝订阅<strong>整个分享</strong>；选中目录＝该子树（含未来新增）同步，选中文件＝只同步该文件。
-            目标默认为上方“保存到”的网盘目录；如需添加本地目标、改为定时轮询或更多高级项，可创建后在「分享同步」页编辑。
+            网盘目标为上方“保存到”的目录；可额外勾选“同步到本地”添加一个本地目标。更多高级项可创建后在「分享同步」页编辑。
           </div>
         </template>
       </el-form>
@@ -191,6 +204,18 @@
       @confirm-download="handleConfirmDownload"
       @use-default="handleUseDefaultDownload"
   />
+
+  <!-- 本地同步目标目录选择弹窗（创建订阅时可选本地目标） -->
+  <FilePickerModal
+      v-model="showSyncLocalPicker"
+      mode="download"
+      select-type="directory"
+      title="选择本地同步目录"
+      :initial-path="downloadConfig?.recent_directory || downloadConfig?.default_directory || downloadConfig?.download_dir"
+      :default-download-dir="downloadConfig?.default_directory || downloadConfig?.download_dir"
+      @confirm-download="handleSyncLocalConfirm"
+      @use-default="handleSyncLocalUseDefault"
+  />
 </template>
 
 <script setup lang="ts">
@@ -221,7 +246,7 @@ import {
   type TransferConfig,
   type DownloadConfig
 } from '@/api/config'
-import { createSubscription, type CreateShareSubscriptionRequest } from '@/api/shareSync'
+import { createSubscription, type CreateShareSubscriptionRequest, type SyncTarget } from '@/api/shareSync'
 import { useAuthStore } from '@/stores/auth'
 
 const authStore = useAuthStore()
@@ -261,6 +286,9 @@ const form = reactive({
   syncIntervalSecs: 1800,
   includePaths: [] as string[],
   excludePatterns: [] as string[],
+  // 创建订阅时可选的本地同步目标
+  syncToLocal: false,
+  syncLocalPath: '',
 })
 
 // 对话框步骤状态
@@ -280,6 +308,7 @@ const passwordError = ref('')
 const transferConfig = ref<TransferConfig | null>(null)
 const downloadConfig = ref<DownloadConfig | null>(null)
 const showDownloadPicker = ref(false)
+const showSyncLocalPicker = ref(false)
 const transferAllMode = ref(false)
 
 // 表单验证规则
@@ -389,6 +418,8 @@ function handleClose() {
   form.syncIntervalSecs = 1800
   form.includePaths = []
   form.excludePatterns = []
+  form.syncToLocal = false
+  form.syncLocalPath = ''
   errorMessage.value = ''
   passwordError.value = ''
   // 重置文件选择状态
@@ -507,6 +538,10 @@ async function createSyncSubscription() {
     ElMessage.error('轮询间隔不能小于 600 秒')
     return
   }
+  if (form.syncToLocal && !form.syncLocalPath.trim()) {
+    ElMessage.error('已开启“同步到本地”，请选择本地目录')
+    return
+  }
 
   submitting.value = true
   errorMessage.value = ''
@@ -517,9 +552,7 @@ async function createSyncSubscription() {
       password: form.password || null,
       include_paths: form.includePaths,
       exclude_patterns: form.excludePatterns,
-      targets: [
-        { kind: 'netdisk', remote_path: form.savePath, save_fs_id: form.saveFsId },
-      ],
+      targets: buildSyncTargets(),
       poll_config: {
         enabled: true,
         mode: 'interval',
@@ -630,6 +663,29 @@ async function handleConfirmDownload(payload: { path: string; setAsDefault: bool
   await executeTransfer(path, isTransferAll)
 }
 
+// 本地同步目标：选定目录（path 原样，不做归一化，保留 Windows D:\ 等原样交后端）
+function handleSyncLocalConfirm(payload: { path: string; setAsDefault: boolean }) {
+  showSyncLocalPicker.value = false
+  form.syncLocalPath = String(payload.path || '').trim()
+}
+function handleSyncLocalUseDefault() {
+  showSyncLocalPicker.value = false
+  form.syncLocalPath = String(
+    downloadConfig.value?.default_directory || downloadConfig.value?.download_dir || ''
+  ).trim()
+}
+
+// 构造订阅目标：网盘目标（上方“保存到”）+ 可选本地目标
+function buildSyncTargets(): SyncTarget[] {
+  const targets: SyncTarget[] = [
+    { kind: 'netdisk', remote_path: form.savePath, save_fs_id: form.saveFsId },
+  ]
+  if (form.syncToLocal) {
+    targets.push({ kind: 'local', local_path: form.syncLocalPath.trim() })
+  }
+  return targets
+}
+
 // 处理使用默认目录下载
 async function handleUseDefaultDownload() {
   showDownloadPicker.value = false
@@ -717,6 +773,12 @@ watch(() => form.password, () => {
   font-size: 12px;
   line-height: 1.5;
   color: var(--el-text-color-secondary);
+}
+
+.local-target-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
 }
 
 .step-back {

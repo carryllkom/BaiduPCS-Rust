@@ -43,14 +43,14 @@
           <template #title>转存管理</template>
         </el-menu-item>
 
-        <el-menu-item index="/autobackup">
-          <el-icon><Refresh /></el-icon>
-          <template #title>自动备份</template>
-        </el-menu-item>
-
         <el-menu-item index="/share-sync">
           <el-icon><Connection /></el-icon>
           <template #title>分享同步</template>
+        </el-menu-item>
+
+        <el-menu-item index="/autobackup">
+          <el-icon><Refresh /></el-icon>
+          <template #title>自动备份</template>
         </el-menu-item>
 
         <el-menu-item index="/cloud-dl">
@@ -127,14 +127,14 @@
             <span>转存管理</span>
           </el-menu-item>
 
-          <el-menu-item index="/autobackup">
-            <el-icon><Refresh /></el-icon>
-            <span>自动备份</span>
-          </el-menu-item>
-
           <el-menu-item index="/share-sync">
             <el-icon><Connection /></el-icon>
             <span>分享同步</span>
+          </el-menu-item>
+
+          <el-menu-item index="/autobackup">
+            <el-icon><Refresh /></el-icon>
+            <span>自动备份</span>
           </el-menu-item>
 
           <el-menu-item index="/cloud-dl">

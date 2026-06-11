@@ -1,10 +1,8 @@
 <template>
   <div class="share-sync-view">
-    <el-page-header :icon="ArrowRight" content="分享同步" class="page-header">
-      <template #content>
-        <span class="page-title">分享同步</span>
-      </template>
-    </el-page-header>
+    <div class="page-header">
+      <h2 class="page-title">分享同步</h2>
+    </div>
 
     <p class="page-desc">
       订阅第三方分享链接，自动监听内容更新并按"覆盖式 / 新版本式 / 跳过"策略把变更同步到网盘目录或本地目录。
@@ -156,7 +154,9 @@
             </el-descriptions-item>
           </el-descriptions>
         </el-card>
-        <el-empty v-else description="请选择订阅查看详情" />
+        <el-card v-else shadow="hover" class="detail-card placeholder-card">
+          <el-empty description="请选择订阅查看详情" />
+        </el-card>
       </el-col>
 
       <!-- 右侧：运行历史 -->
@@ -352,7 +352,7 @@ import ShareIncludeExcludeEditor from '@/components/ShareIncludeExcludeEditor.vu
 import { FilePickerModal } from '@/components/FilePicker'
 import { getConfig, updateRecentDirDebounced, setDefaultDownloadDir, type DownloadConfig } from '@/api/config'
 import {
-  Plus, Edit, Delete, Refresh, ArrowRight, Link,
+  Plus, Edit, Delete, Refresh, Link,
   FolderOpened, VideoPause, VideoPlay,
 } from '@element-plus/icons-vue'
 import {
@@ -1035,8 +1035,20 @@ onUnmounted(() => {
 .share-sync-view {
   padding: 16px;
   .page-header { margin-bottom: 12px; }
-  .page-title { font-weight: 600; font-size: 18px; margin-left: 8px; }
+  .page-title { font-weight: 600; font-size: 18px; margin: 0; }
   .page-desc { color: #909399; font-size: 13px; margin-bottom: 16px; }
+}
+
+// 三列卡片填充视口高度，避免内容少时卡片过矮、右侧大片留白
+.list-card,
+.detail-card,
+.runs-card {
+  min-height: calc(100vh - 200px);
+}
+.placeholder-card {
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .list-card .card-header,
