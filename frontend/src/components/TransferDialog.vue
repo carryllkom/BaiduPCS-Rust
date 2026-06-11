@@ -93,6 +93,8 @@
             <ShareIncludeExcludeEditor
                 :share-url="form.shareUrl"
                 :password="form.password || null"
+                :owner-uid="authStore.activeUid ?? null"
+                :owner-logged-in="true"
                 v-model:include-paths="form.includePaths"
                 v-model:exclude-patterns="form.excludePatterns"
             />
