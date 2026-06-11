@@ -73,9 +73,24 @@
                 >
                   {{ selected.enabled ? '停用' : '启用' }}
                 </el-button>
-                <el-button size="small" type="success" :icon="Refresh" @click="triggerNow" :loading="triggering">
-                  立即同步
-                </el-button>
+                <el-tooltip
+                  :disabled="selectedOwnerLoggedIn"
+                  content="订阅所属账号未登录，请先登录该账号再触发同步"
+                  placement="top"
+                >
+                  <span>
+                    <el-button
+                      size="small"
+                      type="success"
+                      :icon="Refresh"
+                      @click="triggerNow"
+                      :loading="triggering"
+                      :disabled="!selectedOwnerLoggedIn"
+                    >
+                      立即同步
+                    </el-button>
+                  </span>
+                </el-tooltip>
                 <el-button size="small" type="danger" :icon="Delete" @click="removeSubscription">删除</el-button>
               </div>
             </div>
@@ -196,6 +211,8 @@
           <ShareIncludeExcludeEditor
               :share-url="form.share_url"
               :password="form.password || null"
+              :owner-uid="selected?.owner_uid ?? null"
+              :owner-logged-in="selectedOwnerLoggedIn"
               v-model:include-paths="form.include_paths"
               v-model:exclude-patterns="form.exclude_patterns"
           />
@@ -365,6 +382,13 @@ const ownerFilter = ref<number | null>(null)
 const displayedSubscriptions = computed(() => {
   if (ownerFilter.value === null) return subscriptions.value
   return subscriptions.value.filter(s => s.owner_uid === ownerFilter.value)
+})
+
+// 当前选中订阅的所属账号是否已登录：未登录则禁用依赖网盘 client 的操作（触发同步 / 预览目录树）
+// 并提示登录该账号（对齐 AutoBackup：不要求用户先切号，但 owner 未登录时网盘操作不可用）。
+const selectedOwnerLoggedIn = computed(() => {
+  if (!selected.value) return false
+  return authStore.accounts.some(a => a.uid === selected.value!.owner_uid)
 })
 
 // 各账号订阅数量（AccountFilter badge 展示）

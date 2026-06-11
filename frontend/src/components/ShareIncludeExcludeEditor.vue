@@ -28,13 +28,24 @@
               <el-button :icon="Plus" @click="addPath" />
             </template>
           </el-input>
-          <el-button
-            size="small"
-            :icon="FolderOpened"
-            :loading="loadingTree"
-            :disabled="!shareUrl"
-            @click="openTreePicker"
-          >从分享浏览</el-button>
+          <el-tooltip
+            :disabled="ownerLoggedIn !== false"
+            content="订阅所属账号未登录，请先登录该账号再预览目录树"
+            placement="top"
+          >
+            <span>
+              <el-button
+                size="small"
+                :icon="FolderOpened"
+                :loading="loadingTree"
+                :disabled="!shareUrl || ownerLoggedIn === false"
+                @click="openTreePicker"
+              >从分享浏览</el-button>
+            </span>
+          </el-tooltip>
+        </div>
+        <div v-if="ownerLoggedIn === false" class="owner-offline-hint">
+          订阅所属账号未登录，目录树预览不可用，请先登录该账号
         </div>
       </div>
     </div>
@@ -145,6 +156,12 @@ const props = defineProps<{
   password?: string | null
   includePaths: string[]
   excludePatterns: string[]
+  // 订阅所属账号：编辑订阅时传订阅自己的 owner_uid，预览目录树按该账号路由 client
+  // （不传则后端回退当前 active 账号——转存对话框创建场景 owner=active）
+  ownerUid?: number | null
+  // 订阅所属账号是否已登录：显式 false 时禁用目录树预览并提示登录该账号。
+  // undefined（创建场景）= 默认按已登录处理。
+  ownerLoggedIn?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -217,6 +234,10 @@ function openTreePicker() {
     ElMessage.warning('请先填写分享链接')
     return
   }
+  if (props.ownerLoggedIn === false) {
+    ElMessage.warning('订阅所属账号未登录，请先登录该账号再预览目录树')
+    return
+  }
   treeError.value = ''
   treePickerVisible.value = true
 }
@@ -228,7 +249,8 @@ async function loadTree() {
     const resp = await previewTree(
       props.shareUrl.trim(),
       props.password || null,
-      treeDepth.value
+      treeDepth.value,
+      props.ownerUid ?? null
     )
     treeData.value = resp.root || []
     // 重新设置已选
@@ -309,6 +331,12 @@ function formatSize(n: number): string {
   font-size: 12px;
   color: var(--el-text-color-secondary);
   margin-bottom: 6px;
+}
+
+.owner-offline-hint {
+  font-size: 12px;
+  color: var(--el-color-warning);
+  margin-top: 6px;
 }
 
 .path-empty-inline {

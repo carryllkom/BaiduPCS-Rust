@@ -232,11 +232,18 @@ export interface PreviewTreeResponse {
 export async function previewTree(
   share_url: string,
   password?: string | null,
-  depth = 2
+  depth = 2,
+  ownerUid?: number | null
 ): Promise<PreviewTreeResponse> {
   const r = await rawApiClient.post<{ success: boolean; data: PreviewTreeResponse }>(
     `${BASE}/preview-tree`,
-    { share_url, password: password || null, depth }
+    {
+      share_url,
+      password: password || null,
+      depth,
+      // 按订阅所属账号路由网盘 client（编辑非当前账号订阅时必需）；不传则后端回退 active 账号
+      owner_uid: ownerUid ?? undefined,
+    }
   )
   return r.data.data
 }

@@ -333,6 +333,11 @@ pub struct PreviewTreeRequest {
     pub share_url: String,
     #[serde(default)]
     pub password: Option<String>,
+    /// 按订阅所属账号路由网盘 client（编辑订阅时传订阅自己的 owner_uid，
+    /// 不传则回退当前 active 账号——转存对话框创建场景 owner=active）。
+    /// 对齐 AutoBackup：操作按资源 owner_uid 路由，不要求用户先切号。
+    #[serde(default)]
+    pub owner_uid: Option<u64>,
     /// 展开深度（1 = 仅根，2 = 根 + 1 层子目录，默认 2）
     #[serde(default = "default_tree_depth")]
     pub depth: u32,
@@ -373,14 +378,27 @@ pub async fn preview_tree(
     }
     let depth = req.depth.clamp(1, 4);
 
-    // 取 NetdiskClient（必须已登录）
-    let client = {
-        let g = state.netdisk_client.read().await;
-        match &*g {
-            Some(c) => c.clone(),
-            None => return Err(err_bad("网盘客户端未初始化，请先登录百度账号")),
-        }
+    // 按订阅所属账号路由网盘 client（对齐 AutoBackup）：
+    // owner_uid 显式传入 → 用该账号；否则回退当前 active 账号（转存对话框创建场景）。
+    // 该账号未登录 → 返回明确错误，前端据此禁用预览并提示登录该账号，不要求先切号。
+    let owner_uid = match req.owner_uid {
+        Some(raw) => crate::auth::Uid::new(raw),
+        None => match *state.active_uid.read().await {
+            Some(active) => active,
+            None => return Err(err_bad("无活跃账号且未指定 owner_uid，请先登录百度账号")),
+        },
     };
+    let client = state
+        .client_pool
+        .read()
+        .await
+        .get_client(owner_uid)
+        .ok_or_else(|| {
+            err_bad(&format!(
+                "订阅所属账号 uid={} 未登录，无法预览目录树，请先登录该账号",
+                owner_uid.raw()
+            ))
+        })?;
 
     // 解析链接
     let share_link = client
