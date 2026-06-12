@@ -154,7 +154,17 @@ const TRANSIENT_KEYWORDS: &[&str] = &[
 /// 重试同一组只会再撞同一面墙,正确做法是拆小再试(阶段 4 二分)。
 /// - `-33`(文件数超限) — 百度对单次转存的 fs_id 总数有上限
 /// - `task_errno=-33` — 同上,只是写法不同
-const DIR_AMBIGUOUS_KEYWORDS: &[&str] = &["errno=-33", "task_errno=-33", "文件数量超出限制"];
+/// - `超过上限` / `转存文件数超限` — 同步转存接口 `errno=12 + info errno=130`
+///   返回的"转存文件数超限"(`target_file_nums > target_file_nums_limit`,
+///   非超级会员单次上限 500)。整目录(如 3499 个文件)一次性转存会撞这个上限,
+///   必须二分拆到每批 ≤ 上限。client.rs 把它格式化为"转存文件数 N 超过上限 M"。
+const DIR_AMBIGUOUS_KEYWORDS: &[&str] = &[
+    "errno=-33",
+    "task_errno=-33",
+    "文件数量超出限制",
+    "超过上限",
+    "转存文件数超限",
+];
 
 fn matches_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|n| haystack.contains(n))
@@ -366,6 +376,20 @@ mod tests {
         assert_eq!(e.category(), ErrorCategory::DirTransferAmbiguous);
 
         let e = ShareSyncError::TransferError("文件数量超出限制".into());
+        assert_eq!(e.category(), ErrorCategory::DirTransferAmbiguous);
+    }
+
+    #[test]
+    fn test_dir_transfer_ambiguous_detected_for_file_count_over_limit() {
+        // 同步转存接口 errno=12 + info errno=130「转存文件数超限」：
+        // client.rs 把它格式化为「转存文件数 N 超过上限 M」。整目录一次转存
+        // 撞到非超级会员单次 500 上限时，必须二分拆批而不是整组判失败。
+        let e = ShareSyncError::TransferError("转存文件数 3499 超过上限 500".into());
+        assert_eq!(e.category(), ErrorCategory::DirTransferAmbiguous);
+        assert!(e.is_bisect_trigger());
+        assert!(!e.should_retry());
+
+        let e = ShareSyncError::TransferError("转存文件数超限".into());
         assert_eq!(e.category(), ErrorCategory::DirTransferAmbiguous);
     }
 
