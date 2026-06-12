@@ -40,6 +40,20 @@ use uuid::Uuid;
 
 const TASK_WAIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const TASK_OPERATION_MAX_ATTEMPTS: usize = 3;
+/// 二分递归深度上限（既用于失败后二分,也用于 Netdisk 主动预拆批）。
+const BISECT_MAX_DEPTH: u32 = 32;
+/// 百度非超级会员单次转存 fs_id 总数上限（默认 500），可用
+/// `BAIDUPCS_TRANSFER_FILE_LIMIT` 覆盖。Netdisk 整目录一次转存超过它必撞
+/// errno=12「转存文件数超限」，故据此主动预拆批,避免提交注定失败的整目录转存。
+const TRANSFER_FILE_LIMIT_DEFAULT: usize = 500;
+
+fn transfer_file_limit() -> usize {
+    std::env::var("BAIDUPCS_TRANSFER_FILE_LIMIT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(TRANSFER_FILE_LIMIT_DEFAULT)
+}
 const TASK_RETRY_BASE_DELAY: Duration = Duration::from_secs(3);
 
 /// 把"环境资源不足"类错误（Quota / LocalDiskFull）映射到 run_item reason
@@ -1167,76 +1181,169 @@ impl<'a> ShareSyncExecutor<'a> {
             target_kind
         );
 
-        let submit_result: Result<String, ShareSyncError> = match target {
-            SyncTarget::Netdisk(t) => {
-                self.hooks
-                    .submit_transfer_batch(
-                        captured,
-                        &t.remote_path,
-                        &items_to_submit,
-                        Some(&internal_label),
-                    )
-                    .await
-            }
-            SyncTarget::Local(t) => {
-                let netdisk_dir = self.transfer_netdisk_root_for_local(t);
-                self.hooks
-                    .submit_download_batch(
-                        &items_to_submit,
-                        &t.local_path,
-                        strategy,
-                        netdisk_dir.as_deref(),
-                    )
-                    .await
-            }
-        };
-
-        let final_err: ShareSyncError = match submit_result {
-            Ok(task_id) => {
-                let require_download_completion = matches!(target, SyncTarget::Local(_));
-                let wait_res = self
-                    .hooks
-                    .wait_transfer_task(&task_id, require_download_completion, TASK_WAIT_TIMEOUT)
-                    .await;
-                match wait_res {
-                    Ok(()) => {
-                        // 成功:把所有 indices 子树叶子标 Completed
-                        let mut all_leaves: Vec<usize> = Vec::new();
-                        for &idx in &indices {
-                            all_leaves.extend(tree.descendants_leaves(idx));
-                        }
-                        for leaf_idx in all_leaves {
-                            let leaf = tree.get(leaf_idx);
-                            let _ = self.persistence.add_run_item(
-                                run_id,
-                                &leaf.path,
-                                SyncAction::Added,
-                                target_kind,
-                                Some(task_id.as_str()),
-                                None,
-                                RunItemStatus::Completed,
-                                None,
-                                None,
-                            );
-                        }
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        warn!(
-                            "share_sync_wait_failed: run_id={} depth={} first_path={} task_id={} err={}",
-                            run_id, depth, first_path, task_id, e
+        // Netdisk 主动预拆批:tree 已知整棵子树文件数,若整目录一次转存注定超过百度
+        // 单次上限(默认 500),直接拆批,而不是先提交一个注定 errno=12 的整目录转存。
+        // 那种注定失败的整目录转存,百度仍会按 ondup 把同名目标改名建出一个空目录
+        // (即用户看到的 `name_<时间戳>` 残留),预拆批可从源头避免它。下载目标无此
+        // 上限,不预拆。受 BAIDUPCS_BISECT_ENABLED 控制(与失败后二分同一开关)。
+        {
+            let bisect_enabled = std::env::var("BAIDUPCS_BISECT_ENABLED")
+                .ok()
+                .map(|v| v != "0" && v.to_lowercase() != "false")
+                .unwrap_or(true);
+            if bisect_enabled && matches!(target, SyncTarget::Netdisk(_)) && depth < BISECT_MAX_DEPTH
+            {
+                let leaf_count: usize = indices
+                    .iter()
+                    .map(|&i| tree.descendants_leaves(i).len())
+                    .sum();
+                if leaf_count > transfer_file_limit() {
+                    let groups: Vec<Vec<usize>> = if indices.len() > 1 {
+                        tree_mod::split_indices_two(tree, &indices)
+                    } else {
+                        tree_mod::split_two(tree, indices[0])
+                    };
+                    if !groups.is_empty() && groups.iter().any(|g| !g.is_empty()) {
+                        info!(
+                            "share_sync_presplit: run_id={} depth={} first_path={} leaf_count={} limit={} into={:?}",
+                            run_id,
+                            depth,
+                            first_path,
+                            leaf_count,
+                            transfer_file_limit(),
+                            groups.iter().map(|g| g.len()).collect::<Vec<_>>()
                         );
-                        e
+                        let mut worst: Option<ErrorCategory> = None;
+                        for group in groups {
+                            if group.is_empty() {
+                                continue;
+                            }
+                            if let Err(c) = self
+                                .transfer_node_set(
+                                    captured,
+                                    run_id,
+                                    tree,
+                                    group,
+                                    target,
+                                    summary,
+                                    depth + 1,
+                                )
+                                .await
+                            {
+                                worst = Some(worst.map_or(c, |w| max_category(w, c)));
+                            }
+                        }
+                        return worst.map_or(Ok(()), Err);
                     }
                 }
             }
-            Err(e) => {
+        }
+
+        // Transient（百度临时超时 / 网络抖动，如 errno=4「请求超时，请稍后再试」）:
+        // 同一批退避重试若干次再放弃,避免一次偶发超时就把整批判失败(这跟超限二分
+        // 是两码事:超限重试同组没用要拆小,临时超时重试同组才对)。次数/基准退避可用
+        // env 调整;非 Transient 错误不在此重试,直接交给下方二分 / 终态标记。
+        let transient_max_retries: u32 = std::env::var("BAIDUPCS_SHARE_SYNC_TRANSIENT_RETRIES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3);
+        let transient_base_delay_ms: u64 =
+            std::env::var("BAIDUPCS_SHARE_SYNC_TRANSIENT_BACKOFF_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1000);
+
+        let mut attempt: u32 = 0;
+        let final_err: ShareSyncError = loop {
+            let submit_result: Result<String, ShareSyncError> = match target {
+                SyncTarget::Netdisk(t) => {
+                    self.hooks
+                        .submit_transfer_batch(
+                            captured,
+                            &t.remote_path,
+                            &items_to_submit,
+                            Some(&internal_label),
+                        )
+                        .await
+                }
+                SyncTarget::Local(t) => {
+                    let netdisk_dir = self.transfer_netdisk_root_for_local(t);
+                    self.hooks
+                        .submit_download_batch(
+                            &items_to_submit,
+                            &t.local_path,
+                            strategy,
+                            netdisk_dir.as_deref(),
+                        )
+                        .await
+                }
+            };
+
+            let attempt_err: ShareSyncError = match submit_result {
+                Ok(task_id) => {
+                    let require_download_completion = matches!(target, SyncTarget::Local(_));
+                    let wait_res = self
+                        .hooks
+                        .wait_transfer_task(
+                            &task_id,
+                            require_download_completion,
+                            TASK_WAIT_TIMEOUT,
+                        )
+                        .await;
+                    match wait_res {
+                        Ok(()) => {
+                            // 成功:把所有 indices 子树叶子标 Completed
+                            let mut all_leaves: Vec<usize> = Vec::new();
+                            for &idx in &indices {
+                                all_leaves.extend(tree.descendants_leaves(idx));
+                            }
+                            for leaf_idx in all_leaves {
+                                let leaf = tree.get(leaf_idx);
+                                let _ = self.persistence.add_run_item(
+                                    run_id,
+                                    &leaf.path,
+                                    SyncAction::Added,
+                                    target_kind,
+                                    Some(task_id.as_str()),
+                                    None,
+                                    RunItemStatus::Completed,
+                                    None,
+                                    None,
+                                );
+                            }
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            warn!(
+                                "share_sync_wait_failed: run_id={} depth={} first_path={} task_id={} err={}",
+                                run_id, depth, first_path, task_id, e
+                            );
+                            e
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "share_sync_submit_failed: run_id={} depth={} first_path={} err={}",
+                        run_id, depth, first_path, e
+                    );
+                    e
+                }
+            };
+
+            if attempt_err.should_retry() && attempt < transient_max_retries {
+                let backoff = transient_base_delay_ms.saturating_mul(1u64 << attempt);
                 warn!(
-                    "share_sync_submit_failed: run_id={} depth={} first_path={} err={}",
-                    run_id, depth, first_path, e
+                    "share_sync_transient_retry: run_id={} depth={} first_path={} attempt={}/{} backoff_ms={} err={}",
+                    run_id, depth, first_path, attempt + 1, transient_max_retries, backoff, attempt_err
                 );
-                e
+                if backoff > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                }
+                attempt += 1;
+                continue;
             }
+            break attempt_err;
         };
 
         // 失败处理:判断是否触发二分
@@ -1245,7 +1352,6 @@ impl<'a> ShareSyncExecutor<'a> {
             .ok()
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(true);
-        const BISECT_MAX_DEPTH: u32 = 32;
 
         if bisect_enabled && final_err.is_bisect_trigger() && depth < BISECT_MAX_DEPTH {
             // 决定怎么二分:
@@ -2748,6 +2854,55 @@ mod tests {
         assert_eq!(items[0].status, "completed");
         assert_eq!(items[0].transfer_task_id.as_deref(), Some("dl-2"));
         assert!(items[0].error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_batch_transient_error_retries_then_succeeds() {
+        // 整批(tree 模式 transfer_node_set)提交遇到百度临时超时(errno=4
+        // 「请求超时，请稍后再试」)时,应退避重试而不是整批判失败。MockHooks 的
+        // batch_transfer_error 是单发(take),首次失败、重试即成功 → run Completed。
+        std::env::set_var("BAIDUPCS_SHARE_SYNC_TRANSIENT_BACKOFF_MS", "0");
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().join("db");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let mut s = sub();
+        s.targets = vec![SyncTarget::Netdisk(NetdiskTarget {
+            remote_path: "/同步".into(),
+            save_fs_id: 0,
+            conflict_strategy: None,
+        })];
+        let pm = ShareSyncPersistence::new(&db_dir.join("s.db")).unwrap();
+        pm.upsert_subscription(&s).unwrap();
+        let prev = ShareSnapshot::with_items(&s.id, vec![]);
+        pm.save_snapshot(&prev).unwrap();
+        // 真实目录节点(非 placeholder),这样 tree 模式才会走整批 submit_transfer_batch
+        let curr = ShareSnapshot::with_items(
+            &s.id,
+            vec![
+                ShareSnapshotItem::new("/d", "d", 10, 0, true),
+                item("/d/a.csv", 11, 1),
+                item("/d/b.csv", 12, 1),
+            ],
+        );
+        let diff = diff_snapshots(Some(&prev), &curr);
+        let hooks = MockHooks::default();
+        hooks
+            .batch_transfer_error
+            .lock()
+            .unwrap()
+            .replace(ShareSyncError::TransferError("请求超时，请稍后再试".into()));
+        let ex = ShareSyncExecutor::new(&s, &pm, &hooks);
+        let outcome = ex
+            .apply_with_run_id_tree("rt".into(), &captured(), &diff)
+            .await;
+
+        assert_eq!(outcome.status, RunStatus::Completed);
+        assert_eq!(outcome.diff_summary.failed, 0);
+        // 重试成功的那次 submit 被记录(失败那次在 take 后直接返回 Err,不入列)。
+        assert_eq!(hooks.batch_transfers.lock().unwrap().len(), 1);
+        let items = pm.list_run_items(&outcome.run_id).unwrap();
+        assert!(!items.is_empty());
+        assert!(items.iter().all(|i| i.status == "completed"));
     }
 
     #[test]
