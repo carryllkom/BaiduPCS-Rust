@@ -1,25 +1,28 @@
 <template>
   <div class="share-sync-view">
-    <p class="page-desc">
-      订阅第三方分享链接，自动监听内容更新并按"覆盖式 / 新版本式 / 跳过"策略把变更同步到网盘目录或本地目录。
-    </p>
+    <!-- 顶部工具栏（与其他页面一致） -->
+    <div class="toolbar">
+      <div class="header-left">
+        <h2 v-if="!isMobile">分享同步</h2>
+        <AccountFilter
+          v-if="authStore.hasMultipleAccounts"
+          v-model="ownerFilter"
+          :counts="ownerFilterCounts"
+          :total-count="subscriptions.length"
+          size="large"
+          class="account-filter-slot"
+        />
+      </div>
+      <div class="header-right">
+        <el-button type="primary" :icon="Plus" @click="showTransferDialog = true">新增</el-button>
+      </div>
+    </div>
 
+    <div class="ss-content">
     <el-row :gutter="16">
       <!-- 左侧：订阅卡片列表（自动备份风格：卡片 + 内联进行中子任务） -->
       <el-col :xs="24" :md="selected ? 16 : 24">
-        <div class="ss-toolbar">
-          <span class="ss-toolbar-title">订阅列表（{{ displayedSubscriptions.length }}）</span>
-          <div class="ss-toolbar-actions">
-            <AccountFilter
-              v-if="authStore.hasMultipleAccounts"
-              v-model="ownerFilter"
-              :counts="ownerFilterCounts"
-              :total-count="subscriptions.length"
-              size="small"
-            />
-            <el-button type="primary" size="small" :icon="Plus" @click="showTransferDialog = true">新增</el-button>
-          </div>
-        </div>
+        <div class="ss-list-title">订阅列表（{{ displayedSubscriptions.length }}）</div>
 
         <el-empty
           v-if="displayedSubscriptions.length === 0"
@@ -226,6 +229,7 @@
         </el-card>
       </el-col>
     </el-row>
+    </div>
 
     <!-- 创建/编辑对话框 -->
     <el-dialog
@@ -280,11 +284,13 @@
             </div>
             <div v-if="showLocalPath" class="mode-target-row">
               <span class="mode-target-label">本地目录</span>
-              <el-input
-                v-model="localTargetPath"
-                placeholder="本地绝对路径，如 /data/share-sync 或 D:\share-sync"
-                style="flex: 1"
-              />
+              <span
+                class="mode-target-value"
+                :class="{ 'is-placeholder': !localTargetPath }"
+                @click="openDirPicker()"
+              >
+                {{ localTargetPath || '点击选择本地目录' }}
+              </span>
               <el-button :icon="FolderOpened" @click="openDirPicker()" style="margin-left: 4px">
                 选择
               </el-button>
@@ -370,7 +376,12 @@
     />
 
     <!-- 创建入口：复用转存对话框（默认勾“保持同步”→ 创建订阅） -->
-    <TransferDialog v-model="showTransferDialog" :default-keep-sync="true" @sync-created="onSyncCreated" />
+    <TransferDialog
+      v-model="showTransferDialog"
+      :default-keep-sync="true"
+      :lock-keep-sync="true"
+      @sync-created="onSyncCreated"
+    />
   </div>
 </template>
 
@@ -379,6 +390,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { AxiosError } from 'axios'
 import { useAuthStore } from '@/stores/auth'
+import { useIsMobile } from '@/utils/responsive'
 import AccountFilter from '@/components/AccountFilter.vue'
 import AccountBadge from '@/components/AccountBadge.vue'
 import TransferDialog from '@/components/TransferDialog.vue'
@@ -410,6 +422,8 @@ import { createAdaptivePoller } from '@/utils/backendHealth'
 
 const subscriptions = ref<ShareSubscription[]>([])
 const selected = ref<ShareSubscription | null>(null)
+
+const isMobile = useIsMobile()
 
 // 多账号：账号过滤（null=全部账号）
 const authStore = useAuthStore()
@@ -1301,18 +1315,51 @@ onUnmounted(() => {
 
 <style scoped lang="scss">
 .share-sync-view {
-  padding: 16px;
-  .page-desc { color: #909399; font-size: 13px; margin: 0 0 16px; }
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #f5f5f5;
 }
 
-// ==================== 订阅卡片列表（自动备份风格） ====================
-.ss-toolbar {
+// 顶部工具栏（与转存管理等页面一致）
+.toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  background: white;
+  border-bottom: 1px solid #e0e0e0;
+  padding: 16px 20px;
+
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+
+    h2 {
+      margin: 0;
+      font-size: 18px;
+      color: #333;
+    }
+  }
+
+  .header-right {
+    display: flex;
+    gap: 10px;
+  }
+}
+
+.ss-content {
+  flex: 1;
+  overflow: auto;
+  padding: 16px 20px;
+}
+
+// ==================== 订阅卡片列表（自动备份风格） ====================
+.ss-list-title {
+  font-weight: 500;
+  color: #303133;
   margin-bottom: 12px;
-  .ss-toolbar-title { font-weight: 500; color: #303133; }
-  .ss-toolbar-actions { display: flex; align-items: center; gap: 8px; }
 }
 
 .config-list {
@@ -1450,6 +1497,23 @@ onUnmounted(() => {
       flex-shrink: 0;
       font-size: 13px;
       color: #606266;
+    }
+    .mode-target-value {
+      flex: 1;
+      min-width: 0;
+      padding: 0 11px;
+      height: 32px;
+      line-height: 32px;
+      border: 1px solid var(--el-border-color);
+      border-radius: 4px;
+      font-size: 14px;
+      color: #303133;
+      cursor: pointer;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      &:hover { border-color: var(--el-color-primary); }
+      &.is-placeholder { color: #a8abb2; }
     }
   }
 }
