@@ -38,16 +38,17 @@ export default [
       // 项目里大量使用 _ 前缀占位参数 / 解构丢弃；按 _ 前缀豁免
       'no-unused-vars': 'off',
       '@typescript-eslint/no-unused-vars': [
-        'warn',
+        'error',
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrors: 'none' },
       ],
-      // 以下为既有代码里的存量风格问题：降级为 warning 以便命令现在即可用，
-      // 同时保留信号供后续逐步清理（新引入的真正错误仍由其它 recommended 规则拦截）。
+      // 零风险静态项已全部清理，提为 error 守住后续回归。
+      '@typescript-eslint/no-empty-object-type': 'error',
+      'no-case-declarations': 'error',
+      'no-useless-escape': 'error',
+      'vue/no-parsing-error': 'error',
+      // no-explicit-any 暂保留为 warning：存量 ~140 处 any 收紧涉及大量运行时相关改动，
+      // 留作技术债信号，后续单独 PR 逐步收紧，不在本次 lint 修复内强制。
       '@typescript-eslint/no-explicit-any': 'warn',
-      '@typescript-eslint/no-empty-object-type': 'warn',
-      'no-case-declarations': 'warn',
-      'no-useless-escape': 'warn',
-      'vue/no-parsing-error': 'warn',
     },
   },
 ]

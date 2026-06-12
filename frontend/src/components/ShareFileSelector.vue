@@ -100,7 +100,7 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { Loading, Folder, Document, ArrowRight } from '@element-plus/icons-vue'
 import { useIsMobile } from '@/utils/responsive'
 import { formatFileSize } from '@/api/utils'
-import { previewShareDir, previewShareFiles, type SharedFileInfo, type PreviewShareInfo, type PreviewShareRequest } from '@/api/transfer'
+import { previewShareDir, previewShareFiles, type SharedFileInfo, type PreviewShareInfo } from '@/api/transfer'
 
 const isMobile = useIsMobile()
 
