@@ -281,6 +281,10 @@ impl ShareSyncManager {
             owner_uid: sub.owner_uid,
         });
         info!("ShareSyncManager: 创建订阅 id={}", sub.id);
+        // 启用的订阅创建后立即执行一次首同步，无需等待首个轮询周期
+        if sub.enabled {
+            let _ = self.trigger_one(&sub.id);
+        }
         Ok(sub)
     }
 
