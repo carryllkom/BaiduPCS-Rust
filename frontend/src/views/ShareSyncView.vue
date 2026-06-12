@@ -19,15 +19,13 @@
     </div>
 
     <div class="ss-content">
-    <el-row :gutter="16">
-      <!-- 左侧：订阅卡片列表（自动备份风格：卡片 + 内联进行中子任务） -->
-      <el-col :xs="24" :md="selected ? 16 : 24">
-        <div class="ss-list-title">订阅列表（{{ displayedSubscriptions.length }}）</div>
+      <!-- 订阅卡片列表（自动备份风格：卡片 + 内联进行中子任务），占满全宽 -->
+      <div class="ss-list-title">订阅列表（{{ displayedSubscriptions.length }}）</div>
 
-        <el-empty
-          v-if="displayedSubscriptions.length === 0"
-          :description="ownerFilter === null ? '还没有订阅' : '当前账号下没有订阅'"
-        />
+      <el-empty
+        v-if="displayedSubscriptions.length === 0"
+        :description="ownerFilter === null ? '还没有订阅' : '当前账号下没有订阅'"
+      />
 
         <div v-else class="config-list">
           <el-card
@@ -36,7 +34,7 @@
             class="config-card"
             :class="{ active: selected?.id === s.id, 'is-disabled': !s.enabled }"
             shadow="hover"
-            @click="select(s)"
+            @click="openDetail(s)"
           >
             <!-- 卡片头部 -->
             <div class="config-header">
@@ -128,86 +126,81 @@
             </div>
             <div v-else class="no-active-task">
               <span class="idle-text">当前无进行中子任务</span>
-              <el-button size="small" text type="primary" @click="select(s)">查看运行历史</el-button>
+              <el-button size="small" text type="primary" @click.stop="openRunsDialog(s)">查看运行历史</el-button>
             </div>
           </el-card>
         </div>
-      </el-col>
-
-      <!-- 右侧：选中订阅的详情 + 运行历史 -->
-      <el-col v-if="selected" :xs="24" :md="8">
-        <el-card shadow="hover" class="detail-card">
-          <template #header>
-            <div class="detail-card-header">
-              <span>订阅详情</span>
-              <el-button text :icon="Clock" @click="runsDialogVisible = true">
-                运行历史<span v-if="runs.length > 0">（{{ runs.length }}）</span>
-              </el-button>
-            </div>
-          </template>
-          <el-descriptions :column="1" border>
-            <el-descriptions-item label="名称">{{ selected.name }}</el-descriptions-item>
-            <el-descriptions-item label="分享链接">
-              <el-link type="primary" :href="selected.share_url" target="_blank" :underline="false">
-                {{ selected.share_url }}
-              </el-link>
-            </el-descriptions-item>
-            <el-descriptions-item label="冲突策略">
-              <el-tag :type="strategyTagType(selected.conflict_strategy)">
-                {{ describeStrategy(selected.conflict_strategy) }}
-              </el-tag>
-            </el-descriptions-item>
-            <el-descriptions-item label="目标">
-              <div v-for="(t, i) in selected.targets" :key="i" class="target-line">
-                <el-tag :type="t.kind === 'netdisk' ? 'success' : 'warning'" size="small">
-                  {{ t.kind === 'netdisk' ? '网盘' : '本地' }}
-                </el-tag>
-                <span style="margin-left: 6px">
-                  {{ t.kind === 'netdisk' ? t.remote_path : t.local_path }}
-                </span>
-              </div>
-            </el-descriptions-item>
-            <el-descriptions-item label="同步范围">
-              <div v-if="selected.include_paths.length > 0" class="path-tags">
-                <el-tag
-                  v-for="(p, i) in selected.include_paths"
-                  :key="`inc-${i}`"
-                  size="small"
-                  type="info"
-                >
-                  {{ p }}
-                </el-tag>
-              </div>
-              <span v-else>同步整个分享</span>
-            </el-descriptions-item>
-            <el-descriptions-item label="排除规则">
-              <div v-if="selected.exclude_patterns.length > 0" class="path-tags">
-                <el-tag
-                  v-for="(p, i) in selected.exclude_patterns"
-                  :key="`ex-${i}`"
-                  size="small"
-                  type="info"
-                >
-                  {{ p }}
-                </el-tag>
-              </div>
-              <span v-else>无</span>
-            </el-descriptions-item>
-            <el-descriptions-item label="轮询">
-              <span v-if="isPollEnabled(selected.poll_config)">
-                {{ describeInterval(selected.poll_config) }}
-              </span>
-              <span v-else>已禁用</span>
-            </el-descriptions-item>
-            <el-descriptions-item label="删除缺失">
-              <el-tag v-if="selected.delete_missing" type="danger" size="small">开启</el-tag>
-              <el-tag v-else type="info" size="small">关闭</el-tag>
-            </el-descriptions-item>
-          </el-descriptions>
-        </el-card>
-      </el-col>
-    </el-row>
     </div>
+
+    <!-- 订阅详情对话框 -->
+    <el-dialog v-model="detailDialogVisible" title="订阅详情" width="640px">
+      <template v-if="selected">
+        <div class="detail-dialog-toolbar">
+          <el-button text :icon="Clock" @click="runsDialogVisible = true">
+            运行历史<span v-if="runs.length > 0">（{{ runs.length }}）</span>
+          </el-button>
+        </div>
+        <el-descriptions :column="1" border>
+          <el-descriptions-item label="名称">{{ selected.name }}</el-descriptions-item>
+          <el-descriptions-item label="分享链接">
+            <el-link type="primary" :href="selected.share_url" target="_blank" :underline="false">
+              {{ selected.share_url }}
+            </el-link>
+          </el-descriptions-item>
+          <el-descriptions-item label="冲突策略">
+            <el-tag :type="strategyTagType(selected.conflict_strategy)">
+              {{ describeStrategy(selected.conflict_strategy) }}
+            </el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="目标">
+            <div v-for="(t, i) in selected.targets" :key="i" class="target-line">
+              <el-tag :type="t.kind === 'netdisk' ? 'success' : 'warning'" size="small">
+                {{ t.kind === 'netdisk' ? '网盘' : '本地' }}
+              </el-tag>
+              <span style="margin-left: 6px">
+                {{ t.kind === 'netdisk' ? t.remote_path : t.local_path }}
+              </span>
+            </div>
+          </el-descriptions-item>
+          <el-descriptions-item label="同步范围">
+            <div v-if="selected.include_paths.length > 0" class="path-tags">
+              <el-tag
+                v-for="(p, i) in selected.include_paths"
+                :key="`inc-${i}`"
+                size="small"
+                type="info"
+              >
+                {{ p }}
+              </el-tag>
+            </div>
+            <span v-else>同步整个分享</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="排除规则">
+            <div v-if="selected.exclude_patterns.length > 0" class="path-tags">
+              <el-tag
+                v-for="(p, i) in selected.exclude_patterns"
+                :key="`ex-${i}`"
+                size="small"
+                type="info"
+              >
+                {{ p }}
+              </el-tag>
+            </div>
+            <span v-else>无</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="轮询">
+            <span v-if="isPollEnabled(selected.poll_config)">
+              {{ describeInterval(selected.poll_config) }}
+            </span>
+            <span v-else>已禁用</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="删除缺失">
+            <el-tag v-if="selected.delete_missing" type="danger" size="small">开启</el-tag>
+            <el-tag v-else type="info" size="small">关闭</el-tag>
+          </el-descriptions-item>
+        </el-descriptions>
+      </template>
+    </el-dialog>
 
     <!-- 创建/编辑对话框 -->
     <el-dialog
@@ -477,6 +470,7 @@ const dialogVisible = ref(false)
 const showTransferDialog = ref(false)
 const runDialogVisible = ref(false)
 const runsDialogVisible = ref(false)
+const detailDialogVisible = ref(false)
 const saving = ref(false)
 const triggeringId = ref<string | null>(null)
 const formRef = ref()
@@ -668,6 +662,18 @@ async function refresh() {
 async function select(s: ShareSubscription) {
   selected.value = s
   await loadRuns(s.id)
+}
+
+// 打开订阅详情弹窗
+async function openDetail(s: ShareSubscription) {
+  await select(s)
+  detailDialogVisible.value = true
+}
+
+// 直接打开运行历史弹窗
+async function openRunsDialog(s: ShareSubscription) {
+  await select(s)
+  runsDialogVisible.value = true
 }
 
 // 切换账号过滤时，若当前选中项被过滤掉，则清空选择，保持详情面板与列表一致
@@ -1478,16 +1484,10 @@ onUnmounted(() => {
   to { transform: rotate(360deg); }
 }
 
-.detail-card { margin-bottom: 16px; }
-
-.detail-card .el-card__header {
-  font-weight: 500;
-}
-
-.detail-card-header {
+.detail-dialog-toolbar {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
+  margin-bottom: 8px;
 }
 
 .target-line { margin: 4px 0; }
