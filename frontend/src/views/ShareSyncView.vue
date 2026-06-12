@@ -325,10 +325,10 @@
         <h4 style="margin-top: 16px">文件动作（{{ currentRun.items.length }}）</h4>
         <el-table :data="currentRun.items" size="small" max-height="400">
           <el-table-column prop="path" label="路径" />
-          <el-table-column prop="action" label="动作" width="80" />
-          <el-table-column prop="target" label="目标" width="80" />
-          <el-table-column prop="status" label="状态" width="100" />
-          <el-table-column prop="reason" label="跳过原因" width="120" />
+          <el-table-column prop="action" label="动作" width="80" :formatter="describeAction" />
+          <el-table-column prop="target" label="目标" width="80" :formatter="describeTarget" />
+          <el-table-column prop="status" label="状态" width="100" :formatter="describeItemStatus" />
+          <el-table-column prop="reason" label="跳过原因" width="120" :formatter="describeReason" />
           <el-table-column prop="error" label="错误" />
         </el-table>
       </div>
@@ -1072,6 +1072,47 @@ function runStatusType(s: string): 'success' | 'warning' | 'danger' | 'info' {
   return s === 'completed' ? 'success' :
     s === 'completed_with_errors' ? 'warning' :
     s === 'failed' ? 'danger' : 'info'
+}
+
+// 运行历史「文件动作」表格里的列值原本是后端枚举英文（added/netdisk/failed…），
+// 这里统一汉化展示。
+const ACTION_LABELS: Record<string, string> = {
+  added: '新增',
+  modified: '修改',
+  removed: '删除',
+  skipped: '跳过',
+}
+const TARGET_LABELS: Record<string, string> = {
+  netdisk: '网盘',
+  local: '本地',
+}
+const ITEM_STATUS_LABELS: Record<string, string> = {
+  pending: '等待',
+  transferring: '转存中',
+  downloading: '下载中',
+  deleting: '删除中',
+  completed: '完成',
+  failed: '失败',
+  skipped: '跳过',
+}
+const REASON_LABELS: Record<string, string> = {
+  quota_full: '网盘空间不足',
+  local_disk_full: '本地磁盘空间不足',
+  skip_due_to_quota_full: '网盘空间不足',
+  skip_due_to_local_disk_full: '本地磁盘空间不足',
+}
+function describeAction(_r: unknown, _c: unknown, v: string): string {
+  return ACTION_LABELS[v] ?? v
+}
+function describeTarget(_r: unknown, _c: unknown, v: string): string {
+  return TARGET_LABELS[v] ?? v
+}
+function describeItemStatus(_r: unknown, _c: unknown, v: string): string {
+  return ITEM_STATUS_LABELS[v] ?? v
+}
+function describeReason(_r: unknown, _c: unknown, v: string | null | undefined): string {
+  if (!v) return '—'
+  return REASON_LABELS[v] ?? v
 }
 
 function runTotalCount(r: RunRecord | RunDetail): number {
