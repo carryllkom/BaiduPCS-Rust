@@ -245,7 +245,7 @@ impl<'a> SnapshotCollector<'a> {
     /// 抓取完整快照
     ///
     /// 流程：root list → BFS 遍历所有子目录 → 合并去重 → 过滤
-    pub async fn collect(self) -> Result<(CapturedShare, ShareSnapshot), ShareSyncError> {
+    pub async fn collect(mut self) -> Result<(CapturedShare, ShareSnapshot), ShareSyncError> {
         let page_size: u32 = 100;
 
         // Step 1: root
@@ -275,6 +275,22 @@ impl<'a> SnapshotCollector<'a> {
         };
 
         let share_root = infer_share_root(&root.files);
+
+        // include_paths 在 from_url 阶段只做了 slash 归一，仍处于「分享内绝对路径 /
+        // sharelink 合成路径」命名空间；而快照条目 path 是「相对分享根」。此处用
+        // share_root 把 include 重新归一到同一命名空间，否则「分享根是某个目录」的
+        // 非根分享会因 dir_allowed 全部判否而采集到 0 个文件 —— 表现为首同步空跑、
+        // added=0、不转存/不下载。
+        if !self.include_paths.is_empty() {
+            let remapped: BTreeSet<String> = self
+                .include_paths
+                .iter()
+                .map(|p| remap_include_to_share_root(p, &share_root))
+                .collect();
+            self.include_index = build_include_index(&remapped);
+            self.include_paths = remapped;
+        }
+
         let mut all_items: Vec<ShareSnapshotItem> = Vec::new();
         let mut seen: HashSet<(String, u64)> = HashSet::new();
         let mut queued_dirs: HashSet<String> = HashSet::new();
@@ -592,6 +608,37 @@ fn normalize_snapshot_path(path: String) -> Option<String> {
     }
 }
 
+/// 去掉 baidu「sharelink 合成路径」头部 `/sharelink<uk>-<shareid>`，
+/// 还原为「相对分享根」路径；非 sharelink 路径原样返回。
+///
+/// 例：`/sharelink3745347292-20270075815/剧集/01.mp4` → `/剧集/01.mp4`
+fn strip_sharelink_prefix(path: &str) -> String {
+    let trimmed = path.trim_start_matches('/');
+    if let Some(rest) = trimmed.strip_prefix("sharelink") {
+        // rest 形如 "<uk>-<shareid>/子路径..." 或 "<uk>-<shareid>"
+        return match rest.find('/') {
+            Some(idx) => format!("/{}", &rest[idx + 1..]),
+            None => "/".to_string(),
+        };
+    }
+    path.to_string()
+}
+
+/// 把订阅里存的 include_path 归一到「相对分享根」命名空间，与快照条目 path
+/// （`normalize_share_path` 产物）保持一致。
+///
+/// include_path 可能来自前端三种来源：
+/// 1. 根级勾选 → 分享内真实绝对路径（如 `/13/a/scan_test`）
+/// 2. 子目录浏览勾选 → sharelink 合成路径（如 `/sharelink<uk>-<id>/scan_test`）
+/// 3. 历史/已相对化数据（如 `/scan_test`）
+///
+/// 三者统一映射到相对分享根，否则非根分享（分享根是某个目录）会匹配不到任何文件。
+fn remap_include_to_share_root(inc: &str, share_root: &str) -> String {
+    let stripped = strip_sharelink_prefix(inc);
+    let name = stripped.rsplit('/').next().unwrap_or("");
+    normalize_share_path(&stripped, name, share_root)
+}
+
 fn parent_dir(path: &str) -> String {
     let path = normalize_snapshot_path(path.to_string()).unwrap_or_else(|| "/".to_string());
     if path == "/" {
@@ -769,6 +816,56 @@ mod tests {
             ),
             "/fina_indicator/000004.SZ.csv"
         );
+    }
+
+    #[test]
+    fn test_remap_include_absolute_path_to_share_root() {
+        // 用户实际场景：分享根是单个目录 scan_test，分享内真实路径
+        // /13/a测试上传1/scan_test；前端按根级勾选把真实绝对路径存进 include。
+        let files = vec![shared_file("/13/a测试上传1/scan_test", "scan_test", 1, true)];
+        let share_root = infer_share_root(&files);
+        assert_eq!(share_root, "/13/a测试上传1");
+
+        // 修复前：include 仍是绝对路径，与快照相对路径 /scan_test 对不上。
+        // 修复后：remap 到相对分享根 → /scan_test。
+        let remapped = remap_include_to_share_root("/13/a测试上传1/scan_test", &share_root);
+        assert_eq!(remapped, "/scan_test");
+
+        let mut set = BTreeSet::new();
+        set.insert(remapped);
+        let index = build_include_index(&set);
+        // 目录自身命中 → dir_allowed 会放行、BFS 进入该目录
+        assert!(index.contains("/scan_test"));
+        // 目录下的文件（快照相对路径）是 include 的后代 → item_allowed 放行
+        assert!(is_path_ancestor_or_self("/scan_test/foo.mp4", "/scan_test"));
+    }
+
+    #[test]
+    fn test_remap_include_sharelink_path_to_share_root() {
+        // 子目录浏览勾选时前端存的是 sharelink 合成路径。
+        let share_root = "/13/a测试上传1";
+        let remapped = remap_include_to_share_root(
+            "/sharelink3745347292-20270075815/scan_test/sub",
+            share_root,
+        );
+        assert_eq!(remapped, "/scan_test/sub");
+    }
+
+    #[test]
+    fn test_remap_include_already_relative_is_idempotent() {
+        // 已是相对分享根的历史/正确数据，remap 后保持不变。
+        let share_root = "/13/a测试上传1";
+        assert_eq!(
+            remap_include_to_share_root("/scan_test", share_root),
+            "/scan_test"
+        );
+    }
+
+    #[test]
+    fn test_remap_include_root_share_keeps_absolute() {
+        // 分享根为 "/"（多个不同顶层目录）时，绝对路径与快照命名空间一致，保持不变。
+        let remapped = remap_include_to_share_root("/13/foo", "/");
+        assert_eq!(remapped, "/13/foo");
     }
 
     #[test]
