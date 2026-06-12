@@ -94,6 +94,33 @@ pub enum ShareSyncEvent {
         #[serde(default)]
         max_bisect_depth: Option<u32>,
     },
+    /// 子任务实时进度（转存段 / 下载段）
+    ///
+    /// 由「每个 run 的进度广播器」周期性推送（约 1s），与自动备份的 `FileProgress` 对齐。
+    /// 仅承载某个订阅自己的子任务（按 `backup_config_id="share-sync:{id}"` 归属），
+    /// 绝不与自动备份或「下载管理」混淆。
+    ItemProgress {
+        run_id: String,
+        subscription_id: String,
+        /// 底层任务 id（下载任务 id 或内部转存任务 id），前端据此做 upsert 去重
+        task_id: String,
+        /// 文件名 / 展示名
+        name: String,
+        /// 子任务种类:`"transfer"`(转存段) | `"download"`(下载段)
+        kind: String,
+        /// 子任务状态字符串(downloading / completed / failed / transferring ...)
+        status: String,
+        /// 已完成字节(下载段);转存段用已完成文件数
+        downloaded: u64,
+        /// 总字节(下载段);转存段用总文件数
+        total: u64,
+        /// 进度百分比 0-100
+        progress: f64,
+        /// 瞬时速度(B/s,仅下载段有意义)
+        speed: u64,
+        #[serde(default)]
+        owner_uid: u64,
+    },
     /// 一次同步失败
     RunFailed {
         run_id: String,
@@ -139,6 +166,9 @@ impl ShareSyncEvent {
             | Self::ItemStatusChanged {
                 subscription_id, ..
             }
+            | Self::ItemProgress {
+                subscription_id, ..
+            }
             | Self::RunCompleted {
                 subscription_id, ..
             }
@@ -159,6 +189,7 @@ impl ShareSyncEvent {
             | Self::DiffDetected { owner_uid, .. }
             | Self::ItemScheduled { owner_uid, .. }
             | Self::ItemStatusChanged { owner_uid, .. }
+            | Self::ItemProgress { owner_uid, .. }
             | Self::RunCompleted { owner_uid, .. }
             | Self::RunFailed { owner_uid, .. } => *owner_uid,
         }
@@ -175,6 +206,7 @@ impl ShareSyncEvent {
             Self::DiffDetected { .. } => "diff_detected",
             Self::ItemScheduled { .. } => "item_scheduled",
             Self::ItemStatusChanged { .. } => "item_status_changed",
+            Self::ItemProgress { .. } => "item_progress",
             Self::RunCompleted { .. } => "run_completed",
             Self::RunFailed { .. } => "run_failed",
         }
@@ -237,6 +269,34 @@ mod tests {
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains("\"type\":\"run_completed\""));
         assert!(json.contains("\"owner_uid\":5"));
+    }
+
+    #[test]
+    fn test_item_progress_serialize() {
+        // PR-D：子任务实时进度事件，走 share_sync 频道（type=item_progress）
+        let e = ShareSyncEvent::ItemProgress {
+            run_id: "r".into(),
+            subscription_id: "s1".into(),
+            task_id: "dl-1".into(),
+            name: "a.txt".into(),
+            kind: "download".into(),
+            status: "downloading".into(),
+            downloaded: 50,
+            total: 100,
+            progress: 50.0,
+            speed: 1024,
+            owner_uid: 9,
+        };
+        assert_eq!(e.subscription_id(), "s1");
+        assert_eq!(e.owner_uid(), 9);
+        assert_eq!(e.event_type_name(), "item_progress");
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains("\"type\":\"item_progress\""));
+        assert!(json.contains("\"task_id\":\"dl-1\""));
+        assert!(json.contains("\"kind\":\"download\""));
+        // 反序列化回环
+        let back: ShareSyncEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.event_type_name(), "item_progress");
     }
 
     #[test]

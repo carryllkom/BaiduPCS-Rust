@@ -247,6 +247,21 @@ impl ShareSyncManager {
         self.subscriptions.get(id).map(|kv| kv.value().clone())
     }
 
+    /// 列出某订阅当前的子任务进度（下载段 + 内部转存段），供 REST 轮询兜底接口。
+    ///
+    /// 与「每个 run 的进度广播器」共用 `collect_share_sync_subtasks`，形状一致。
+    /// 账号转存管理器未就绪时返回空列表（视为暂无进行中子任务，不报错）。
+    pub async fn subtasks(&self, id: &str) -> Result<Vec<ShareSyncSubtask>, ShareSyncError> {
+        let sub = self
+            .get_subscription(id)
+            .ok_or_else(|| ShareSyncError::SubscriptionNotFound(id.into()))?;
+        let owner_uid = sub.owner_uid;
+        match self.resolver.transfer_manager(owner_uid).await {
+            Some(tm) => Ok(collect_share_sync_subtasks(&tm, id, owner_uid).await),
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub fn create_subscription(
         self: &Arc<Self>,
         sub: ShareSubscription,
@@ -470,6 +485,19 @@ impl ShareSyncManager {
         });
 
         // 4) 执行
+        // 启动「子任务进度广播器」：run 期间约 1s 推一次 ItemProgress（走 share_sync 频道，
+        // 不与自动备份 / 下载管理混淆）。run 结束后 abort。前端 WS 实时刷，REST 轮询兜底。
+        let progress_handle = {
+            let publisher = Arc::clone(&self.publisher);
+            let transfer = Arc::clone(&transfer);
+            let run_id = run_id.clone();
+            let subscription_id = id.to_string();
+            tokio::spawn(async move {
+                broadcast_subtask_progress(publisher, transfer, run_id, subscription_id, owner_uid)
+                    .await;
+            })
+        };
+
         let hooks = ProductionHooks {
             netdisk,
             transfer,
@@ -498,6 +526,17 @@ impl ShareSyncManager {
                 .apply_with_run_id(run_id.clone(), &captured, &diff)
                 .await
         };
+
+        // run 结束，停止进度广播器（再补推一帧最终态，确保前端拿到 completed/failed）。
+        progress_handle.abort();
+        broadcast_subtask_progress_once(
+            Arc::clone(&self.publisher),
+            self.resolver.transfer_manager(owner_uid).await,
+            run_id.clone(),
+            id.to_string(),
+            owner_uid,
+        )
+        .await;
 
         // 仅当 run 完成**且**没有任何子项因资源类原因（配额满 / 本地磁盘满）被跳过时，
         // 才推进快照基线。否则被跳过、尚未真正落地的项会被写入新基线，导致下一次
@@ -644,6 +683,165 @@ fn should_advance_snapshot_baseline(status: RunStatus) -> bool {
 // 生产环境 ExecutorHooks
 // =====================================================
 
+/// 分享同步子任务的归属 id：`"share-sync:{订阅id}"`。
+///
+/// 永不与自动备份的 UUID 配置 id 冲突，故下载段 `is_backup=true` 复用不会挂到自动备份。
+pub fn share_sync_backup_config_id(subscription_id: &str) -> String {
+    format!("share-sync:{}", subscription_id)
+}
+
+/// 分享同步「进行中子任务」的进度快照（REST 轮询接口 + WS 广播共用同一形状）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ShareSyncSubtask {
+    /// 底层任务 id（下载任务 id 或内部转存任务 id）
+    pub task_id: String,
+    /// 文件名 / 展示名
+    pub name: String,
+    /// 子任务种类:`"transfer"`(转存段) | `"download"`(下载段)
+    pub kind: String,
+    /// 状态字符串(downloading / completed / failed / transferring ...)
+    pub status: String,
+    /// 已完成字节(下载段);转存段用已完成文件数
+    pub downloaded: u64,
+    /// 总字节(下载段);转存段用总文件数
+    pub total: u64,
+    /// 进度百分比 0-100
+    pub progress: f64,
+    /// 瞬时速度(B/s,仅下载段有意义)
+    pub speed: u64,
+    /// 订阅所属账号 uid
+    pub owner_uid: u64,
+}
+
+fn basename_of(path: &str) -> String {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .to_string()
+}
+
+/// 收集某个订阅当前的子任务进度（下载段 + 内部转存段），按 `backup_config_id` 归属。
+///
+/// REST 轮询接口与「每个 run 的进度广播器」共用此函数，保证两条链路形状一致。
+pub async fn collect_share_sync_subtasks(
+    transfer: &TransferManager,
+    subscription_id: &str,
+    owner_uid: u64,
+) -> Vec<ShareSyncSubtask> {
+    let cfg = share_sync_backup_config_id(subscription_id);
+    let mut out: Vec<ShareSyncSubtask> = Vec::new();
+
+    // 下载段:复用自动备份同款查询(is_backup && backup_config_id==cfg)
+    if let Some(dm) = transfer.download_manager_handle().await {
+        for t in dm.get_tasks_by_backup_config(&cfg).await {
+            let name = t
+                .local_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| basename_of(&t.remote_path));
+            let progress = if t.total_size > 0 {
+                (t.downloaded_size as f64 / t.total_size as f64) * 100.0
+            } else {
+                0.0
+            };
+            out.push(ShareSyncSubtask {
+                task_id: t.id.clone(),
+                name,
+                kind: "download".to_string(),
+                status: format!("{:?}", t.status).to_lowercase(),
+                downloaded: t.downloaded_size,
+                total: t.total_size,
+                progress,
+                speed: t.speed,
+                owner_uid,
+            });
+        }
+    }
+
+    // 转存段:内部转存任务(is_internal && backup_config_id==cfg),用文件数做进度
+    for t in transfer.get_all_tasks().await {
+        if t.is_internal && t.backup_config_id.as_deref() == Some(cfg.as_str()) {
+            let progress = if t.total_count > 0 {
+                (t.transferred_count as f64 / t.total_count as f64) * 100.0
+            } else {
+                0.0
+            };
+            out.push(ShareSyncSubtask {
+                task_id: t.id.clone(),
+                name: t
+                    .file_name
+                    .clone()
+                    .unwrap_or_else(|| basename_of(&t.save_path)),
+                kind: "transfer".to_string(),
+                status: format!("{:?}", t.status).to_lowercase(),
+                downloaded: t.transferred_count as u64,
+                total: t.total_count as u64,
+                progress,
+                speed: 0,
+                owner_uid,
+            });
+        }
+    }
+
+    out
+}
+
+/// 收集当前子任务并逐个推送 `ShareSyncEvent::ItemProgress`（一帧）。
+async fn emit_subtask_progress(
+    publisher: &Arc<dyn ShareSyncEventPublisher>,
+    transfer: &TransferManager,
+    run_id: &str,
+    subscription_id: &str,
+    owner_uid: u64,
+) {
+    let subs = collect_share_sync_subtasks(transfer, subscription_id, owner_uid).await;
+    for s in subs {
+        publisher.publish(ShareSyncEvent::ItemProgress {
+            run_id: run_id.to_string(),
+            subscription_id: subscription_id.to_string(),
+            task_id: s.task_id,
+            name: s.name,
+            kind: s.kind,
+            status: s.status,
+            downloaded: s.downloaded,
+            total: s.total,
+            progress: s.progress,
+            speed: s.speed,
+            owner_uid,
+        });
+    }
+}
+
+/// 「每个 run 的子任务进度广播器」：约 1s 推一帧，直到被 abort。
+async fn broadcast_subtask_progress(
+    publisher: Arc<dyn ShareSyncEventPublisher>,
+    transfer: Arc<TransferManager>,
+    run_id: String,
+    subscription_id: String,
+    owner_uid: u64,
+) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        ticker.tick().await;
+        emit_subtask_progress(&publisher, &transfer, &run_id, &subscription_id, owner_uid).await;
+    }
+}
+
+/// 补推一帧最终态（run 结束后调用，确保前端拿到 completed/failed 终态）。
+async fn broadcast_subtask_progress_once(
+    publisher: Arc<dyn ShareSyncEventPublisher>,
+    transfer: Option<Arc<TransferManager>>,
+    run_id: String,
+    subscription_id: String,
+    owner_uid: u64,
+) {
+    if let Some(tm) = transfer {
+        emit_subtask_progress(&publisher, &tm, &run_id, &subscription_id, owner_uid).await;
+    }
+}
+
 struct ProductionHooks {
     /// 该订阅所属账号的网盘客户端（已按 owner_uid 解析）
     netdisk: Arc<NetdiskClient>,
@@ -663,7 +861,7 @@ impl ProductionHooks {
     /// 分享同步子任务的归属 id：`"share-sync:{订阅id}"`。
     /// 永不与自动备份的 UUID 配置 id 冲突，故 `is_backup=true` 复用不会挂到自动备份。
     fn share_sync_backup_config_id(&self) -> String {
-        format!("share-sync:{}", self.subscription_id)
+        share_sync_backup_config_id(&self.subscription_id)
     }
 }
 

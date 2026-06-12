@@ -234,6 +234,11 @@ impl TransferManager {
         info!("转存管理器已设置下载管理器");
     }
 
+    /// 取下载管理器句柄（供分享同步进度广播 / 轮询接口读取子任务下载进度）
+    pub async fn download_manager_handle(&self) -> Option<Arc<DownloadManager>> {
+        self.download_manager.read().await.clone()
+    }
+
     /// 设置文件夹下载管理器（用于自动下载文件夹）
     pub async fn set_folder_download_manager(&self, fdm: Arc<FolderDownloadManager>) {
         let mut lock = self.folder_download_manager.write().await;
