@@ -134,6 +134,9 @@ pub struct CapturedShare {
     pub short_key: String,
     pub shareid: String,
     pub uk: String,
+    /// 分享 UK（access_share_page 返回的 share_uk，转存接口需要，可能与 uk 不同）。
+    /// 留存它,拆批转存时各批可复用而不必每批重新 access_share_page。
+    pub share_uk: String,
     pub bdstoken: String,
     pub password: Option<String>,
     pub randsk: Option<String>,
@@ -150,6 +153,7 @@ pub struct SnapshotCollector<'a> {
     short_key: String,
     shareid: String,
     uk: String,
+    share_uk: String,
     bdstoken: String,
     password: Option<String>,
     randsk: Option<String>,
@@ -232,6 +236,7 @@ impl<'a> SnapshotCollector<'a> {
             short_key: share_link.short_key,
             shareid: page.shareid,
             uk: page.uk,
+            share_uk: page.share_uk,
             bdstoken: page.bdstoken,
             password: effective_pwd,
             randsk,
@@ -387,6 +392,7 @@ impl<'a> SnapshotCollector<'a> {
             short_key: self.short_key.clone(),
             shareid: root_shareid,
             uk: root_uk,
+            share_uk: self.share_uk.clone(),
             bdstoken: self.bdstoken.clone(),
             password: self.password.clone(),
             randsk: self.randsk.clone(),

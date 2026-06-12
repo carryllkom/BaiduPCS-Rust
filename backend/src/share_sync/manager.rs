@@ -954,6 +954,7 @@ impl ExecutorHooks for ProductionHooks {
             share_url: share_url_for_captured(captured),
             password: captured.password.clone(),
             randsk: captured.randsk.clone(),
+            prefetched_share: Some(prefetched_share_for_captured(captured)),
             save_path: target_dir.to_string(),
             save_fs_id: 0,
             auto_download: Some(false),
@@ -1117,6 +1118,7 @@ impl ExecutorHooks for ProductionHooks {
             share_url: share_url_for_captured(&self.captured),
             password: self.captured.password.clone(),
             randsk: self.captured.randsk.clone(),
+            prefetched_share: Some(prefetched_share_for_captured(&self.captured)),
             save_path: sync_save_path,
             save_fs_id: 0,
             auto_download: Some(true),
@@ -1304,6 +1306,7 @@ impl ExecutorHooks for ProductionHooks {
             share_url: share_url_for_captured(captured),
             password: captured.password.clone(),
             randsk: captured.randsk.clone(),
+            prefetched_share: Some(prefetched_share_for_captured(captured)),
             save_path: target_dir.to_string(),
             save_fs_id: 0,
             // 网盘目标不下载本地，与单文件版本一致
@@ -1395,6 +1398,7 @@ impl ExecutorHooks for ProductionHooks {
             share_url: share_url_for_captured(&self.captured),
             password: self.captured.password.clone(),
             randsk: self.captured.randsk.clone(),
+            prefetched_share: Some(prefetched_share_for_captured(&self.captured)),
             // 走 is_share_direct_download=true 路径，save_path 在 transfer 里
             // 会被 temp_dir 强制覆盖——这是 transfer 的硬编码行为，不在 share-sync
             // 控制范围。最终落点是 `local_download_path`（自动下载阶段被消费）。
@@ -1439,6 +1443,19 @@ impl ExecutorHooks for ProductionHooks {
 impl ProductionHooks {
     fn transfer_manager(&self) -> Arc<TransferManager> {
         self.transfer.clone()
+    }
+}
+
+/// 用已捕获的分享上下文构造 `SharePageInfo`，让 `create_task` 跳过逐批
+/// `access_share_page`（大目录二分拆批降频、规避风控）。
+fn prefetched_share_for_captured(
+    captured: &CapturedShare,
+) -> crate::transfer::types::SharePageInfo {
+    crate::transfer::types::SharePageInfo {
+        shareid: captured.shareid.clone(),
+        uk: captured.uk.clone(),
+        share_uk: captured.share_uk.clone(),
+        bdstoken: captured.bdstoken.clone(),
     }
 }
 
@@ -1658,6 +1675,26 @@ mod tests {
                 mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
             })],
         )
+    }
+
+    #[test]
+    fn test_prefetched_share_for_captured_maps_all_fields() {
+        let captured = CapturedShare {
+            short_key: "1abc".into(),
+            shareid: "sid".into(),
+            uk: "uk-1".into(),
+            share_uk: "share-uk-2".into(),
+            bdstoken: "tok".into(),
+            password: Some("pwd".into()),
+            randsk: Some("rsk".into()),
+        };
+        let info = prefetched_share_for_captured(&captured);
+        assert_eq!(info.shareid, "sid");
+        assert_eq!(info.uk, "uk-1");
+        // share_uk 必须取 access_share_page 返回的 share_uk（转存接口用），
+        // 不能误用 uk —— 二者在部分分享场景下不同。
+        assert_eq!(info.share_uk, "share-uk-2");
+        assert_eq!(info.bdstoken, "tok");
     }
 
     #[tokio::test]

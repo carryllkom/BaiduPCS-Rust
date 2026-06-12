@@ -190,6 +190,7 @@ pub async fn create_transfer(
         share_url: req.share_url,
         password: req.password,
         randsk: None,
+        prefetched_share: None,
         save_path: req.save_path,
         save_fs_id: req.save_fs_id,
         auto_download: req.auto_download,

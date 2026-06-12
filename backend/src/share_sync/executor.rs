@@ -2155,6 +2155,7 @@ mod tests {
             short_key: "1abc".into(),
             shareid: "123".into(),
             uk: "456".into(),
+            share_uk: "456".into(),
             bdstoken: "tok".into(),
             password: None,
             randsk: None,
