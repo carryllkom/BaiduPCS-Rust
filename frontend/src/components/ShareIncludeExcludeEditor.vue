@@ -17,17 +17,6 @@
           >{{ p }}</el-tag>
         </div>
         <div class="path-actions">
-          <el-input
-            v-model="pathInput"
-            size="small"
-            placeholder="手动输入路径，如 /剧集"
-            style="width: 220px; margin-right: 8px"
-            @keyup.enter="addPath"
-          >
-            <template #append>
-              <el-button :icon="Plus" @click="addPath" />
-            </template>
-          </el-input>
           <el-tooltip
             :disabled="ownerLoggedIn !== false"
             content="订阅所属账号未登录，请先登录该账号再预览目录树"
@@ -106,7 +95,7 @@
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { AxiosError } from 'axios'
-import { Plus, FolderOpened } from '@element-plus/icons-vue'
+import { FolderOpened } from '@element-plus/icons-vue'
 import ShareFileSelector from './ShareFileSelector.vue'
 import {
   previewShareFiles,
@@ -132,7 +121,6 @@ const emit = defineEmits<{
   'update:excludePatterns': [value: string[]]
 }>()
 
-const pathInput = ref('')
 const excludeInput = ref('')
 
 // 分享文件选择器（与转存对话框同款体验）
@@ -148,15 +136,6 @@ function normalizePath(v: string): string {
   const prefixed = s.startsWith('/') ? s : `/${s}`
   if (prefixed.length === 1) return '/'
   return prefixed.endsWith('/') ? prefixed.slice(0, -1) : prefixed
-}
-
-function addPath() {
-  const v = normalizePath(pathInput.value)
-  if (!v) return
-  if (!props.includePaths.includes(v)) {
-    emit('update:includePaths', [...props.includePaths, v])
-  }
-  pathInput.value = ''
 }
 
 function removeInclude(i: number) {

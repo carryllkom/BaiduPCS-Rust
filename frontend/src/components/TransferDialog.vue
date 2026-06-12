@@ -66,7 +66,8 @@
         </el-form-item>
 
         <!-- 保持同步：勾选后不是一次性转存，而是在「分享同步」创建一个订阅 -->
-        <el-form-item label="保持同步">
+        <!-- 从「分享同步」页进入时锁定为开并隐藏开关（该入口只用于创建订阅） -->
+        <el-form-item v-if="!lockKeepSync" label="保持同步">
           <el-switch v-model="form.keepSync" />
           <span class="switch-tip">开启后创建订阅，持续监听该分享的新增/变更并自动转存</span>
         </el-form-item>
@@ -105,10 +106,13 @@
           </el-form-item>
           <el-form-item v-if="form.syncToLocal" label="本地目录">
             <div class="local-target-row">
-              <el-input
-                  v-model="form.syncLocalPath"
-                  placeholder="本地绝对路径，如 D:\share-sync 或 /data/share-sync"
-              />
+              <span
+                  class="local-target-value"
+                  :class="{ 'is-placeholder': !form.syncLocalPath }"
+                  @click="showSyncLocalPicker = true"
+              >
+                {{ form.syncLocalPath || '点击选择本地目录' }}
+              </span>
               <el-button @click="showSyncLocalPicker = true">选择目录</el-button>
             </div>
           </el-form-item>
@@ -258,6 +262,7 @@ const props = defineProps<{
   currentPath?: string    // FilesView 当前浏览的目录路径
   currentFsId?: number    // FilesView 当前浏览的目录 fs_id
   defaultKeepSync?: boolean  // 打开时是否默认勾选“保持同步”（分享同步页入口）
+  lockKeepSync?: boolean     // 锁定“保持同步”为开并隐藏开关（分享同步页「新增」入口专用）
 }>()
 
 const emit = defineEmits<{
@@ -366,6 +371,13 @@ async function handleOpen() {
   errorMessage.value = ''
   passwordError.value = ''
 
+  // 不依赖配置请求的默认值先设好（保证锁定/默认“保持同步”即使配置加载失败也生效）
+  form.keepSync = props.lockKeepSync ? true : (props.defaultKeepSync ?? false)
+  form.syncName = ''
+  form.syncIntervalSecs = 1800
+  form.includePaths = []
+  form.excludePatterns = []
+
   try {
     const [transferCfg, appConfig] = await Promise.all([
       getTransferConfig(),
@@ -376,11 +388,6 @@ async function handleOpen() {
     downloadConfig.value = appConfig.download
 
     form.autoDownload = transferConfig.value?.default_behavior === 'transfer_and_download'
-    form.keepSync = props.defaultKeepSync ?? false
-    form.syncName = ''
-    form.syncIntervalSecs = 1800
-    form.includePaths = []
-    form.excludePatterns = []
     await setDefaultSavePath()
   } catch (error) {
     console.error('加载转存配置失败:', error)
@@ -782,8 +789,27 @@ watch(() => form.password, () => {
 
 .local-target-row {
   display: flex;
+  align-items: center;
   gap: 8px;
   width: 100%;
+
+  .local-target-value {
+    flex: 1;
+    min-width: 0;
+    padding: 0 11px;
+    height: 32px;
+    line-height: 32px;
+    border: 1px solid var(--el-border-color);
+    border-radius: 4px;
+    font-size: 14px;
+    color: var(--el-text-color-primary);
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    &:hover { border-color: var(--el-color-primary); }
+    &.is-placeholder { color: var(--el-text-color-placeholder); }
+  }
 }
 
 .step-back {
