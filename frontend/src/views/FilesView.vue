@@ -605,6 +605,7 @@ function getPathUpTo(index: number): string {
 
 // 加载文件列表
 async function loadFiles(dir: string, append: boolean = false) {
+  if (append && (loadingMore.value || !hasMore.value)) return
   const version = ++fileRequestVersion
 
   if (append) {
@@ -615,9 +616,11 @@ async function loadFiles(dir: string, append: boolean = false) {
     hasMore.value = true
   }
 
+  // 追加时请求下一页；页码只在成功后前进，避免失败时无限累加
+  const requestPage = append ? currentPage.value + 1 : 1
+
   try {
-    const page = append ? currentPage.value : 1
-    const data = await getFileList(dir, page, 50)
+    const data = await getFileList(dir, requestPage, 50)
     if (version !== fileRequestVersion) return
 
     if (append) {
@@ -630,19 +633,22 @@ async function loadFiles(dir: string, append: boolean = false) {
     hasMore.value = data.has_more
     currentPage.value = data.page
   } catch (error: any) {
+    if (version !== fileRequestVersion) return
+    // 失败时停止继续加载，避免滚动加载在出错后不断 page+1 重发造成死循环
+    hasMore.value = false
     ElMessage.error(error.message || '加载文件列表失败')
     console.error('加载文件列表失败:', error)
   } finally {
-    loading.value = false
-    loadingMore.value = false
+    if (version === fileRequestVersion) {
+      loading.value = false
+      loadingMore.value = false
+    }
   }
 }
 
 // 加载下一页
 async function loadNextPage() {
   if (loadingMore.value || !hasMore.value) return
-
-  currentPage.value++
   await loadFiles(currentDir.value, true)
 }
 
@@ -1242,21 +1248,28 @@ async function handleSearch() {
 async function loadMoreSearchResults() {
   if (searchLoading.value || !searchHasMore.value) return
 
-  searchPage.value++
   searchLoading.value = true
   loadingMore.value = true
   const version = ++fileRequestVersion
+  // 页码只在成功后前进，避免失败时无限累加
+  const requestPage = searchPage.value + 1
 
   try {
-    const data = await searchFiles(searchKeyword.value.trim(), searchPage.value, 100)
+    const data = await searchFiles(searchKeyword.value.trim(), requestPage, 100)
     if (version !== fileRequestVersion) return
     fileList.value = [...fileList.value, ...(data.list as FileItem[])]
     searchHasMore.value = data.has_more
+    searchPage.value = requestPage
   } catch (error: any) {
+    if (version !== fileRequestVersion) return
+    // 失败时停止继续加载，避免滚动加载在出错后不断翻页死循环
+    searchHasMore.value = false
     ElMessage.error(error.message || '加载更多搜索结果失败')
   } finally {
-    searchLoading.value = false
-    loadingMore.value = false
+    if (version === fileRequestVersion) {
+      searchLoading.value = false
+      loadingMore.value = false
+    }
   }
 }
 
