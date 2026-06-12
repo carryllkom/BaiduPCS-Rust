@@ -210,7 +210,7 @@
       <!-- 内容区 -->
       <el-main class="main-content" :class="{ 'has-tabbar': isMobile }">
         <router-view v-slot="{ Component }">
-          <transition name="fade-slide" mode="out-in">
+          <transition name="fade-slide" mode="out-in" @after-enter="handleViewEntered">
             <component :is="Component" />
           </transition>
         </router-view>
@@ -376,6 +376,12 @@ async function handleWebLogout() {
       console.error('退出 Web 认证失败:', error)
     }
   }
+}
+
+// 路由切换进入动画结束后，触发一次 resize，让 el-table 等基于尺寸的组件重新布局。
+// 视图在 <transition> 进行中挂载会量到中间态尺寸，导致表格留白；动画收尾补一次重算修正。
+function handleViewEntered() {
+  window.dispatchEvent(new Event('resize'))
 }
 
 // 监听路由变化，移动端自动关闭抽屉
