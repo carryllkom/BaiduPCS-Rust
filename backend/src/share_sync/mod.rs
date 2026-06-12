@@ -21,8 +21,8 @@ pub mod tree;
 pub mod types;
 
 pub use config::{
-    CreateShareSubscriptionRequest, LocalTarget, NetdiskTarget, PollConfig, ShareSubscription,
-    SyncTarget, UpdateShareSubscriptionRequest, MIN_POLL_INTERVAL_SECS,
+    CreateShareSubscriptionRequest, LocalSyncMode, LocalTarget, NetdiskTarget, PollConfig,
+    ShareSubscription, SyncTarget, UpdateShareSubscriptionRequest, MIN_POLL_INTERVAL_SECS,
 };
 pub use diff::{diff_snapshots, DiffSummaryView, ShareDiff, ShareModifiedItem};
 pub use error::{ErrorCategory, ShareSyncError};

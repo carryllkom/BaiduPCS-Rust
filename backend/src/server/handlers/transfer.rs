@@ -199,6 +199,9 @@ pub async fn create_transfer(
         selected_fs_ids: req.selected_fs_ids,
         selected_files: req.selected_files,
         owner_uid_override: Some(effective_uid),
+        // 用户手动转存：非内部任务、无同步归属
+        is_internal: false,
+        backup_config_id: None,
     };
 
     // 创建任务
