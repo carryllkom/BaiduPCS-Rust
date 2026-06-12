@@ -37,9 +37,9 @@
               <el-button
                 size="small"
                 :icon="FolderOpened"
-                :loading="loadingTree"
+                :loading="previewing"
                 :disabled="!shareUrl || ownerLoggedIn === false"
-                @click="openTreePicker"
+                @click="openPicker"
               >从分享浏览</el-button>
             </span>
           </el-tooltip>
@@ -77,79 +77,42 @@
       </div>
     </div>
 
-    <!-- 目录树选择对话框 -->
+    <!-- 从分享选择子路径：复用转存同款 ShareFileSelector -->
     <el-dialog
-      v-model="treePickerVisible"
+      v-model="pickerVisible"
       title="从分享中选择要同步的子路径"
-      width="640px"
+      width="680px"
       :close-on-click-modal="false"
       append-to-body
-      @open="loadTree"
     >
-      <div class="tree-picker-toolbar">
-        <el-input
-          v-model="treeFilterText"
-          placeholder="搜索路径/文件名"
-          clearable
-          size="small"
-          style="width: 240px"
-        />
-        <el-checkbox v-model="treeCheckStrictly" style="margin-left: 12px">
-          父子独立选择
-        </el-checkbox>
-        <el-radio-group v-model="treeDepth" size="small" style="margin-left: 12px">
-          <el-radio-button :value="1">仅根</el-radio-button>
-          <el-radio-button :value="2">2 层</el-radio-button>
-          <el-radio-button :value="3">3 层</el-radio-button>
-        </el-radio-group>
-        <el-button size="small" :loading="loadingTree" :icon="Refresh" style="margin-left: 12px" @click="loadTree">刷新</el-button>
-      </div>
-      <el-alert
-        v-if="treeError"
-        :title="treeError"
-        type="error"
-        :closable="false"
-        show-icon
-        style="margin-bottom: 8px"
+      <ShareFileSelector
+        :files="previewFiles"
+        :loading="previewing"
+        :share-info="previewShareInfo"
+        :share-url="shareUrl"
+        :share-password="password || undefined"
+        @update:selected-files="onSelectedFiles"
       />
-      <el-tree
-        ref="treeRef"
-        :data="treeData"
-        :props="treeProps"
-        node-key="path"
-        show-checkbox
-        :check-strictly="treeCheckStrictly"
-        :default-checked-keys="includePaths"
-        :filter-node-method="filterTreeNode"
-        :default-expand-all="false"
-        v-loading="loadingTree"
-        empty-text="暂无内容或分享已失效"
-        style="max-height: 420px; overflow: auto"
-      >
-        <template #default="{ data }">
-          <span class="tree-node">
-            <el-icon v-if="data.is_dir"><FolderOpened /></el-icon>
-            <el-icon v-else><Document /></el-icon>
-            <span style="margin-left: 4px">{{ data.name }}</span>
-            <span v-if="!data.is_dir" class="tree-size">{{ formatSize(data.size) }}</span>
-          </span>
-        </template>
-      </el-tree>
       <template #footer>
-        <span class="tree-picker-hint">已选 {{ includePaths.length }} 个路径</span>
-        <el-button @click="treePickerVisible = false">取消</el-button>
-        <el-button type="primary" @click="confirmTreePicker">确定</el-button>
+        <span class="picker-hint">已选 {{ pendingSelected.length }} 项</span>
+        <el-button @click="pickerVisible = false">取消</el-button>
+        <el-button type="primary" @click="confirmPicker">确定</el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, watch, nextTick } from 'vue'
-import { ElMessage, type ElTree } from 'element-plus'
+import { ref } from 'vue'
+import { ElMessage } from 'element-plus'
 import type { AxiosError } from 'axios'
-import { Plus, Refresh, FolderOpened, Document } from '@element-plus/icons-vue'
-import { previewTree, type TreeNode } from '@/api/shareSync'
+import { Plus, FolderOpened } from '@element-plus/icons-vue'
+import ShareFileSelector from './ShareFileSelector.vue'
+import {
+  previewShareFiles,
+  type SharedFileInfo,
+  type PreviewShareInfo,
+} from '@/api/transfer'
 
 const props = defineProps<{
   shareUrl: string
@@ -172,24 +135,12 @@ const emit = defineEmits<{
 const pathInput = ref('')
 const excludeInput = ref('')
 
-// 目录树选择
-const treePickerVisible = ref(false)
-const treeData = ref<TreeNode[]>([])
-const treeRef = ref<InstanceType<typeof ElTree>>()
-const treeProps = {
-  children: 'children',
-  label: 'name',
-  isLeaf: (d: TreeNode) => !d.is_dir,
-} as const
-const treeFilterText = ref('')
-const treeCheckStrictly = ref(false)
-const treeDepth = ref<number>(2)
-const loadingTree = ref(false)
-const treeError = ref('')
-
-watch(treeFilterText, (v) => {
-  treeRef.value?.filter(v)
-})
+// 分享文件选择器（与转存对话框同款体验）
+const pickerVisible = ref(false)
+const previewing = ref(false)
+const previewFiles = ref<SharedFileInfo[]>([])
+const previewShareInfo = ref<PreviewShareInfo | null>(null)
+const pendingSelected = ref<SharedFileInfo[]>([])
 
 function normalizePath(v: string): string {
   const s = v.trim().replace(/\/+/g, '/')
@@ -229,7 +180,7 @@ function removeExclude(i: number) {
   emit('update:excludePatterns', next)
 }
 
-function openTreePicker() {
+async function openPicker() {
   if (!props.shareUrl || !props.shareUrl.trim()) {
     ElMessage.warning('请先填写分享链接')
     return
@@ -238,77 +189,50 @@ function openTreePicker() {
     ElMessage.warning('订阅所属账号未登录，请先登录该账号再预览目录树')
     return
   }
-  treeError.value = ''
-  treePickerVisible.value = true
-}
-
-async function loadTree() {
-  loadingTree.value = true
-  treeError.value = ''
+  previewing.value = true
   try {
-    const resp = await previewTree(
-      props.shareUrl.trim(),
-      props.password || null,
-      treeDepth.value,
-      props.ownerUid ?? null
-    )
-    treeData.value = resp.root || []
-    // 重新设置已选
-    await nextTick()
-    props.includePaths.forEach((p: string) => {
-      treeRef.value?.setChecked?.(p, true, false)
+    const resp = await previewShareFiles({
+      share_url: props.shareUrl.trim(),
+      password: props.password || undefined,
     })
+    previewFiles.value = resp.files || []
+    previewShareInfo.value = resp.share_info ?? null
+    pendingSelected.value = []
+    pickerVisible.value = true
   } catch (e) {
     const ax = e as AxiosError<{ message?: string; error?: string }>
-    treeError.value =
+    ElMessage.error(
       ax?.response?.data?.message ||
-      ax?.response?.data?.error ||
-      (e as Error)?.message ||
-      '加载目录树失败'
+        ax?.response?.data?.error ||
+        (e as Error)?.message ||
+        '加载分享文件失败',
+    )
   } finally {
-    loadingTree.value = false
+    previewing.value = false
   }
 }
 
-function confirmTreePicker() {
-  // 只取“完全勾选”的节点。半选(getHalfCheckedNodes)是因子节点部分选中而处于
-  // 中间态的祖先目录——若把它们也写进 include_paths，后端按“include_path = 整棵
-  // 子树（前缀匹配）”的语义会把未勾选的兄弟节点一并纳入，造成过度同步
-  // （例：只勾 /A/B/1.txt 却把整个 /A 都同步）。祖先目录用于下钻遍历的需求，
-  // 后端已通过 build_include_index 自动补齐，无需前端再加。
-  const checked = treeRef.value?.getCheckedNodes?.(false, false) || []
-  const paths = checked
-    .map((n) => normalizePath((n as unknown as TreeNode).path))
-    .filter((p: string) => p.length > 0)
-  // 去重 + 裁剪被已勾选祖先覆盖的冗余后代（勾选目录即代表整棵子树）
-  const nextInclude: string[] = []
+function onSelectedFiles(files: SharedFileInfo[]) {
+  pendingSelected.value = files
+}
+
+function confirmPicker() {
+  const selectedPaths = pendingSelected.value
+    .map((f) => normalizePath(f.path))
+    .filter((p) => p.length > 0)
+  // 与已有路径合并去重；勾选目录即代表整棵子树，裁剪掉被祖先覆盖的冗余后代
+  const merged: string[] = []
   const seen = new Set<string>()
-  for (const p of paths) {
+  for (const p of [...props.includePaths, ...selectedPaths]) {
     if (seen.has(p)) continue
     seen.add(p)
-    const coveredByAncestor = paths.some((a) => a !== p && p.startsWith(`${a}/`))
-    if (coveredByAncestor) continue
-    nextInclude.push(p)
+    merged.push(p)
   }
-  emit('update:includePaths', nextInclude)
-  treePickerVisible.value = false
-}
-
-function filterTreeNode(query: string, data: TreeNode) {
-  if (!query) return true
-  return (data.name as string)?.toLowerCase?.().includes(query.toLowerCase())
-}
-
-function formatSize(n: number): string {
-  if (!n) return ''
-  const u = ['B', 'KB', 'MB', 'GB', 'TB']
-  let i = 0
-  let v = n
-  while (v >= 1024 && i < u.length - 1) {
-    v /= 1024
-    i++
-  }
-  return v.toFixed(v >= 100 || i === 0 ? 0 : 1) + ' ' + u[i]
+  const trimmed = merged.filter(
+    (p) => !merged.some((a) => a !== p && p.startsWith(`${a}/`)),
+  )
+  emit('update:includePaths', trimmed)
+  pickerVisible.value = false
 }
 </script>
 
@@ -355,25 +279,7 @@ function formatSize(n: number): string {
   gap: 4px;
 }
 
-.tree-picker-toolbar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  margin-bottom: 8px;
-}
-
-.tree-node {
-  display: flex;
-  align-items: center;
-}
-
-.tree-size {
-  margin-left: 8px;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-
-.tree-picker-hint {
+.picker-hint {
   margin-right: auto;
   font-size: 12px;
   color: var(--el-text-color-secondary);
