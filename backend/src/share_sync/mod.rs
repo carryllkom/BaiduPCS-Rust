@@ -28,7 +28,10 @@ pub use diff::{diff_snapshots, DiffSummaryView, ShareDiff, ShareModifiedItem};
 pub use error::{ErrorCategory, ShareSyncError};
 pub use events::{ShareSyncEvent, ShareSyncEventPublisher};
 pub use executor::{timestamped_name, ApplyOutcome, ExecutorHooks, ShareSyncExecutor};
-pub use manager::{ManagerConfig, ShareSyncManager};
+pub use manager::{
+    collect_share_sync_subtasks, share_sync_backup_config_id, ManagerConfig, ShareSyncManager,
+    ShareSyncSubtask,
+};
 pub use persistence::{
     normalize_pagination, RunItemRecord, RunRecord, ShareSyncPersistence, DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,

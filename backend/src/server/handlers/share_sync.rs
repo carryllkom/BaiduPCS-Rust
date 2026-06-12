@@ -304,6 +304,20 @@ pub struct RunDetailDto {
     pub items: Vec<RunItemRecord>,
 }
 
+/// GET /api/v1/share-sync/subscriptions/:id/subtasks
+///
+/// 列出该订阅当前「进行中子任务」的进度（下载段 + 内部转存段），供前端轮询兜底
+/// （WS `item_progress` 事件断线时使用）。与 WS 广播共用同一数据形状。
+pub async fn list_subtasks(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<ApiResponse<Vec<crate::share_sync::ShareSyncSubtask>>>> {
+    let m = get_manager(&state).await?;
+    require_subscription(&m, &id)?;
+    let subs = m.subtasks(&id).await.map_err(map_share_err)?;
+    Ok(Json(ApiResponse::success(subs)))
+}
+
 /// GET /api/v1/share-sync/subscriptions/:id/snapshots/latest
 pub async fn latest_snapshot(
     State(state): State<AppState>,
