@@ -683,7 +683,10 @@ function buildSyncTargets(): SyncTarget[] {
     { kind: 'netdisk', remote_path: form.savePath, save_fs_id: form.saveFsId },
   ]
   if (form.syncToLocal) {
-    targets.push({ kind: 'local', local_path: form.syncLocalPath.trim() })
+    // 转存对话框的网盘目标即「保存到」目录并保留，本地段从该保留目录下载
+    // → 对应「转存并下载」(transfer_and_download)。分享直下(临时目录+清理)的一次性
+    //   场景由独立入口处理，订阅创建后可在「分享同步」页改为其它模式。
+    targets.push({ kind: 'local', local_path: form.syncLocalPath.trim(), mode: 'transfer_and_download' })
   }
   return targets
 }

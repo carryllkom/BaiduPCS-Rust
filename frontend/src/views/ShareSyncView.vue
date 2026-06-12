@@ -261,38 +261,35 @@
             <el-radio-button value="skip">跳过</el-radio-button>
           </el-radio-group>
         </el-form-item>
-        <el-form-item label="目标">
-          <div v-for="(t, i) in form.targets" :key="i" class="target-form-row">
-            <el-select v-model="t.kind" style="width: 110px" @change="onTargetKindChange(t)">
-              <el-option value="netdisk" label="网盘" :disabled="kindUsedByOther(i, 'netdisk')" />
-              <el-option value="local" label="本地" :disabled="kindUsedByOther(i, 'local')" />
-            </el-select>
-            <el-input
-              v-if="t.kind === 'netdisk'"
-              v-model="(t as NetdiskTarget).remote_path"
-              placeholder="网盘路径，如 /我的资源/同步"
-              style="margin-left: 8px; flex: 1"
-            />
-            <el-input
-              v-else
-              v-model="(t as LocalTarget).local_path"
-              placeholder="本地绝对路径，如 /data/share-sync 或 D:\share-sync"
-              style="margin-left: 8px; flex: 1"
-            />
-            <el-button
-              v-if="t.kind === 'local'"
-              :icon="FolderOpened"
-              @click="openDirPicker(i)"
-              style="margin-left: 4px"
-            >
-              选择
-            </el-button>
-            <el-button :icon="Delete" link type="danger" @click="form.targets.splice(i, 1)" style="margin-left: 4px" />
+        <el-form-item label="同步方式">
+          <div class="sync-mode-editor">
+            <el-radio-group v-model="localSyncMode">
+              <el-radio-button value="netdisk_only">仅转存到网盘</el-radio-button>
+              <el-radio-button value="transfer_and_download">转存并下载</el-radio-button>
+              <el-radio-button value="share_direct">分享直下</el-radio-button>
+            </el-radio-group>
+            <div class="sync-mode-hint">{{ syncModeHint }}</div>
+
+            <div v-if="showNetdiskPath" class="mode-target-row">
+              <span class="mode-target-label">网盘目录</span>
+              <el-input
+                v-model="netdiskRemotePath"
+                placeholder="网盘路径，如 /我的资源/同步"
+                style="flex: 1"
+              />
+            </div>
+            <div v-if="showLocalPath" class="mode-target-row">
+              <span class="mode-target-label">本地目录</span>
+              <el-input
+                v-model="localTargetPath"
+                placeholder="本地绝对路径，如 /data/share-sync 或 D:\share-sync"
+                style="flex: 1"
+              />
+              <el-button :icon="FolderOpened" @click="openDirPicker()" style="margin-left: 4px">
+                选择
+              </el-button>
+            </div>
           </div>
-          <el-button :icon="Plus" link :disabled="!canAddTarget" @click="addTarget()">
-            添加目标
-          </el-button>
-          <span class="target-tip">最多 1 个网盘目标 + 1 个本地目标（可共存=转存直下）</span>
         </el-form-item>
         <el-form-item label="轮询">
           <el-radio-group v-model="form.poll_config.mode">
@@ -404,6 +401,7 @@ import {
   type PollConfig,
   type ShareSyncWsEvent,
   type ShareSyncSubtask,
+  type LocalSyncMode,
   listSubscriptions, updateSubscription,
   deleteSubscription, setSubscriptionEnabled, triggerSubscription, listRuns, getRun, listSubtasks,
 } from '@/api/shareSync'
@@ -456,7 +454,6 @@ function ownerLoggedIn(s: ShareSubscription): boolean {
 // 本地目录选择（与转存一致：FilePickerModal 选目录 + 最近目录联动）
 const downloadConfig = ref<DownloadConfig | null>(null)
 const dirPickerVisible = ref(false)
-const dirPickerTargetIndex = ref<number>(-1)
 
 const dialogVisible = ref(false)
 // 创建入口：复用转存对话框
@@ -469,10 +466,10 @@ const scheduledTime = ref<string>('03:00')
 
 // 路径编辑
 function createDefaultTarget(): SyncTarget {
-  return { kind: 'local', local_path: '', conflict_strategy: null }
+  return { kind: 'local', local_path: '', conflict_strategy: null, mode: 'share_direct' }
 }
 
-// 目标模型收窄：最多 1 个网盘 + 1 个本地（可共存=转存直下）。
+// 目标模型收窄：最多 1 个网盘 + 1 个本地（可共存=转存并下载）。
 function targetKindCounts(): { netdisk: number; local: number } {
   let netdisk = 0
   let local = 0
@@ -483,26 +480,73 @@ function targetKindCounts(): { netdisk: number; local: number } {
   return { netdisk, local }
 }
 
-// 某个类型是否已被「其它」目标占用（用于禁用下拉里的重复类型，避免两个网盘/两个本地）
-function kindUsedByOther(index: number, kind: 'netdisk' | 'local'): boolean {
-  return form.value.targets.some((t, i) => i !== index && t.kind === kind)
+// ==================== 本地同步三模式选择器 ====================
+// 三模式直接映射到目标组合（与后端 LocalSyncMode + validate 一致）：
+//   仅转存到网盘  = 仅 Netdisk target
+//   转存并下载    = Netdisk target + Local{ mode: transfer_and_download }（依赖网盘目录留存）
+//   分享直下      = 仅 Local{ mode: share_direct }（转存临时目录→下载→清理，网盘不留存）
+type SyncModeUi = 'netdisk_only' | 'transfer_and_download' | 'share_direct'
+
+function findNetdiskTarget(): NetdiskTarget | undefined {
+  return form.value.targets.find((t): t is NetdiskTarget => t.kind === 'netdisk')
+}
+function findLocalTarget(): LocalTarget | undefined {
+  return form.value.targets.find((t): t is LocalTarget => t.kind === 'local')
 }
 
-// 还能不能再加目标：网盘和本地各自上限 1
-const canAddTarget = computed(() => {
-  const { netdisk, local } = targetKindCounts()
-  return netdisk < 1 || local < 1
+const localSyncMode = computed<SyncModeUi>({
+  get() {
+    const local = findLocalTarget()
+    if (!local) return 'netdisk_only'
+    return local.mode === 'transfer_and_download' ? 'transfer_and_download' : 'share_direct'
+  },
+  set(mode: SyncModeUi) {
+    // 切换模式时尽量保留已填的网盘/本地路径，避免误清空
+    const nd = findNetdiskTarget()
+    const lo = findLocalTarget()
+    const remotePath = nd?.remote_path ?? '/'
+    const saveFsId = nd?.save_fs_id ?? 0
+    const localPath = lo?.local_path ?? ''
+    const ndStrategy = nd?.conflict_strategy ?? null
+    const loStrategy = lo?.conflict_strategy ?? null
+    const mkNetdisk = (): NetdiskTarget => ({ kind: 'netdisk', remote_path: remotePath, save_fs_id: saveFsId, conflict_strategy: ndStrategy })
+    const mkLocal = (m: LocalSyncMode): LocalTarget => ({ kind: 'local', local_path: localPath, conflict_strategy: loStrategy, mode: m })
+
+    if (mode === 'netdisk_only') {
+      form.value.targets = [mkNetdisk()]
+    } else if (mode === 'transfer_and_download') {
+      form.value.targets = [mkNetdisk(), mkLocal('transfer_and_download')]
+    } else {
+      form.value.targets = [mkLocal('share_direct')]
+    }
+  },
 })
 
-// 加目标时自动选当前缺失的类型：没有网盘先补网盘，否则补本地
-function addTarget() {
-  const { netdisk } = targetKindCounts()
-  if (netdisk < 1) {
-    form.value.targets.push({ kind: 'netdisk', remote_path: '/', save_fs_id: 0, conflict_strategy: null })
-  } else {
-    form.value.targets.push({ kind: 'local', local_path: '', conflict_strategy: null })
+const showNetdiskPath = computed(() => localSyncMode.value !== 'share_direct')
+const showLocalPath = computed(() => localSyncMode.value !== 'netdisk_only')
+
+const syncModeHint = computed(() => {
+  switch (localSyncMode.value) {
+    case 'netdisk_only': return '只把分享内容转存到指定网盘目录并保留，不下载到本地。'
+    case 'transfer_and_download': return '转存到网盘目录保留，再从该目录下载到本地（需填写网盘目录）。'
+    default: return '转存到临时目录后下载到本地，下载完成即清理，网盘不留存。'
   }
-}
+})
+
+const netdiskRemotePath = computed<string>({
+  get() { return findNetdiskTarget()?.remote_path ?? '' },
+  set(v: string) {
+    const nd = findNetdiskTarget()
+    if (nd) nd.remote_path = v
+  },
+})
+const localTargetPath = computed<string>({
+  get() { return findLocalTarget()?.local_path ?? '' },
+  set(v: string) {
+    const lo = findLocalTarget()
+    if (lo) lo.local_path = v
+  },
+})
 
 const defaultForm = (): {
   name: string
@@ -832,6 +876,7 @@ function buildSanitizedPayload() {
       nextTargets.push({
         kind: 'local',
         local_path: local,
+        mode: t.mode === 'transfer_and_download' ? 'transfer_and_download' : 'share_direct',
         ...(t.conflict_strategy ? { conflict_strategy: t.conflict_strategy } : {}),
       })
     }
@@ -905,19 +950,6 @@ async function openRun(runId: string) {
   }
 }
 
-function onTargetKindChange(t: SyncTarget) {
-  if (t.kind === 'netdisk') {
-    t.remote_path = normalizeRemotePath(String(t.remote_path || '/'))
-    t.save_fs_id = Number.isFinite(Number(t.save_fs_id)) ? Number(t.save_fs_id) : 0
-    delete (t as unknown as Record<string, unknown>).local_path
-  }
-  if (t.kind === 'local') {
-    t.local_path = String(t.local_path || '').trim()
-    delete (t as unknown as Record<string, unknown>).save_fs_id
-    delete (t as unknown as Record<string, unknown>).remote_path
-  }
-}
-
 // ==================== 本地目录选择（对齐转存） ====================
 
 const dirPickerInitialPath = computed(
@@ -930,18 +962,15 @@ const dirPickerDefaultDir = computed(
   () => downloadConfig.value?.default_directory || downloadConfig.value?.download_dir || '',
 )
 
-function openDirPicker(index: number) {
-  dirPickerTargetIndex.value = index
+function openDirPicker() {
   dirPickerVisible.value = true
 }
 
 function applyPickedDir(path: string) {
-  const idx = dirPickerTargetIndex.value
-  const t = form.value.targets[idx] as LocalTarget | undefined
-  if (t && t.kind === 'local') {
-    t.local_path = String(path || '').trim()
+  const lo = findLocalTarget()
+  if (lo) {
+    lo.local_path = String(path || '').trim()
   }
-  dirPickerTargetIndex.value = -1
 }
 
 // FilePickerModal mode="download"：选定目录（path 原样，不做归一化）
@@ -1408,6 +1437,22 @@ onUnmounted(() => {
 .target-line { margin: 4px 0; }
 .target-form-row { display: flex; align-items: center; margin-bottom: 8px; }
 .target-tip { margin-left: 8px; font-size: 12px; color: #909399; }
+
+.sync-mode-editor {
+  width: 100%;
+  .sync-mode-hint { margin: 8px 0 4px; font-size: 12px; color: #909399; }
+  .mode-target-row {
+    display: flex;
+    align-items: center;
+    margin-top: 8px;
+    .mode-target-label {
+      width: 64px;
+      flex-shrink: 0;
+      font-size: 13px;
+      color: #606266;
+    }
+  }
+}
 
 .run-item { cursor: pointer; &:hover { color: #409eff; } }
 .run-stats { font-size: 12px; color: #909399; margin-top: 2px; }
