@@ -91,6 +91,15 @@ pub struct CreateTransferRequest {
     /// 设置后，本次转存的自动下载子任务改走 `DownloadManager::create_backup_task`，
     /// 从而从「下载管理」隐藏并走自动备份同款下载槽优先级、归属到分享同步而非自动备份。
     pub backup_config_id: Option<String>,
+
+    /// 已解析的分享上下文（share-sync 拆批复用）。
+    ///
+    /// 分享同步抓快照时已 `access_share_page` 解析过该分享；大目录二分拆批会对
+    /// 同一分享反复 `create_task`，若每批都重新 `access_share_page` 则请求频率翻倍、
+    /// 更易触发账号风控（errno=132）。`Some(_)` 时 `create_task` 跳过
+    /// `access_share_page`，直接复用此 `SharePageInfo`（密码分享仍会重新校验提取码
+    /// 以刷新本次转存所需的 cookie）。其它调用方传 `None`，行为不变。
+    pub prefetched_share: Option<SharePageInfo>,
 }
 
 /// 创建转存任务响应
@@ -435,11 +444,24 @@ impl TransferManager {
 
         let task_id = task.id.clone();
 
-        // 4. 访问分享页面，获取分享信息
+        // 4. 获取分享信息：share-sync 拆批复用已抓快照时解析的上下文，
+        //    跳过逐批 access_share_page（降低请求频率、规避账号风控）；
+        //    其它调用方仍走 access_share_page 解析。
         let client = self.client.read().unwrap().clone();
-        let share_info_result = client
-            .access_share_page(&share_link.short_key, &share_link.password, true)
-            .await;
+        let share_info_result = match request.prefetched_share.clone() {
+            Some(info) => {
+                info!(
+                    "复用已捕获分享上下文，跳过 access_share_page: shareid={}",
+                    info.shareid
+                );
+                Ok(info)
+            }
+            None => {
+                client
+                    .access_share_page(&share_link.short_key, &share_link.password, true)
+                    .await
+            }
+        };
 
         match share_info_result {
             Ok(info) => {
