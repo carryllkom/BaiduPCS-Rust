@@ -5,70 +5,66 @@
     </p>
 
     <el-row :gutter="16">
-      <!-- 左侧：订阅列表 -->
-      <el-col :xs="24" :md="8">
-        <el-card shadow="hover" class="list-card">
-          <template #header>
-            <div class="card-header">
-              <span>订阅列表（{{ displayedSubscriptions.length }}）</span>
-              <div class="card-header-actions">
-                <AccountFilter
-                  v-if="authStore.hasMultipleAccounts"
-                  v-model="ownerFilter"
-                  :counts="ownerFilterCounts"
-                  :total-count="subscriptions.length"
-                  size="small"
-                />
-                <el-button type="primary" size="small" :icon="Plus" @click="showTransferDialog = true">新增</el-button>
-              </div>
-            </div>
-          </template>
-          <el-empty
-            v-if="displayedSubscriptions.length === 0"
-            :description="ownerFilter === null ? '还没有订阅' : '当前账号下没有订阅'"
-          />
-          <div v-else class="sub-list">
-            <div
-              v-for="s in displayedSubscriptions"
-              :key="s.id"
-              class="sub-item"
-              :class="{ active: selected?.id === s.id }"
-              @click="select(s)"
-            >
-              <div class="sub-name">
-                <el-icon><Link /></el-icon>
-  <span>{{ s.name }}</span>
-                <AccountBadge :owner-uid="s.owner_uid" size="small" />
-                <el-tag v-if="!s.enabled" size="small" type="info">已停用</el-tag>
-              </div>
-              <div class="sub-meta">
-                <span>{{ describeInterval(s.poll_config) }}</span>
-                <span>·</span>
-                <span>{{ describeTargets(s.targets) }}</span>
-              </div>
-            </div>
+      <!-- 左侧：订阅卡片列表（自动备份风格：卡片 + 内联进行中子任务） -->
+      <el-col :xs="24" :md="selected ? 16 : 24">
+        <div class="ss-toolbar">
+          <span class="ss-toolbar-title">订阅列表（{{ displayedSubscriptions.length }}）</span>
+          <div class="ss-toolbar-actions">
+            <AccountFilter
+              v-if="authStore.hasMultipleAccounts"
+              v-model="ownerFilter"
+              :counts="ownerFilterCounts"
+              :total-count="subscriptions.length"
+              size="small"
+            />
+            <el-button type="primary" size="small" :icon="Plus" @click="showTransferDialog = true">新增</el-button>
           </div>
-        </el-card>
-      </el-col>
+        </div>
 
-      <!-- 中间：详情 + 操作（未选中时占满右侧剩余宽度，避免出现窄的空白第二栏） -->
-      <el-col :xs="24" :md="selected ? 10 : 16">
-        <el-card v-if="selected" shadow="hover" class="detail-card">
-          <template #header>
-            <div class="card-header">
-              <span>订阅详情</span>
-              <div>
-                <el-button size="small" :icon="Edit" @click="openEdit">编辑</el-button>
-                <el-button
-                  size="small"
-                  :type="selected.enabled ? 'warning' : 'success'"
-                  :icon="selected.enabled ? VideoPause : VideoPlay"
-                  @click="toggleEnabled"
-                >
-                  {{ selected.enabled ? '停用' : '启用' }}
-                </el-button>
+        <el-empty
+          v-if="displayedSubscriptions.length === 0"
+          :description="ownerFilter === null ? '还没有订阅' : '当前账号下没有订阅'"
+        />
+
+        <div v-else class="config-list">
+          <el-card
+            v-for="s in displayedSubscriptions"
+            :key="s.id"
+            class="config-card"
+            :class="{ active: selected?.id === s.id, 'is-disabled': !s.enabled }"
+            shadow="hover"
+            @click="select(s)"
+          >
+            <!-- 卡片头部 -->
+            <div class="config-header">
+              <div class="config-info">
+                <div class="config-title">
+                  <el-icon :size="18" class="direction-icon"><Link /></el-icon>
+                  <span class="config-name">{{ s.name }}</span>
+                  <AccountBadge :owner-uid="s.owner_uid" size="small" class="task-account-badge" />
+                  <el-tag :type="s.enabled ? 'success' : 'info'" size="small">{{ s.enabled ? '已启用' : '已停用' }}</el-tag>
+                  <el-tag :type="strategyTagType(s.conflict_strategy)" size="small">{{ describeStrategy(s.conflict_strategy) }}</el-tag>
+                </div>
+                <div class="config-path">
+                  <span>{{ describeTargets(s.targets) }}</span>
+                  <span class="dot">·</span>
+                  <span>{{ describeInterval(s.poll_config) }}</span>
+                  <template v-if="s.include_paths.length">
+                    <span class="dot">·</span><span>范围 {{ s.include_paths.length }} 条</span>
+                  </template>
+                  <template v-if="s.exclude_patterns.length">
+                    <span class="dot">·</span><span>排除 {{ s.exclude_patterns.length }} 条</span>
+                  </template>
+                  <template v-if="s.delete_missing">
+                    <span class="dot">·</span><span class="danger-text">删除缺失</span>
+                  </template>
+                </div>
+              </div>
+
+              <!-- 操作按钮 -->
+              <div class="config-actions" @click.stop>
                 <el-tooltip
-                  :disabled="selectedOwnerLoggedIn"
+                  :disabled="ownerLoggedIn(s)"
                   content="订阅所属账号未登录，请先登录该账号再触发同步"
                   placement="top"
                 >
@@ -77,19 +73,70 @@
                       size="small"
                       type="success"
                       :icon="Refresh"
-                      @click="triggerNow"
-                      :loading="triggering"
-                      :disabled="!selectedOwnerLoggedIn"
+                      :loading="triggeringId === s.id"
+                      :disabled="!ownerLoggedIn(s)"
+                      @click="triggerNow(s)"
                     >
                       立即同步
                     </el-button>
                   </span>
                 </el-tooltip>
-                <el-button size="small" type="danger" :icon="Delete" @click="removeSubscription">删除</el-button>
+                <el-button size="small" :icon="Edit" @click="openEdit(s)">编辑</el-button>
+                <el-button
+                  size="small"
+                  :type="s.enabled ? 'warning' : 'success'"
+                  :icon="s.enabled ? VideoPause : VideoPlay"
+                  @click="toggleEnabled(s)"
+                >
+                  {{ s.enabled ? '停用' : '启用' }}
+                </el-button>
+                <el-button size="small" type="danger" :icon="Delete" @click="removeSubscription(s)" />
               </div>
             </div>
-          </template>
 
+            <!-- 进行中子任务（内联展示，无需展开；转存段 / 下载段各自独立进度条） -->
+            <div v-if="subtasksOf(s.id).length" class="active-task-container">
+              <div class="active-task-card">
+                <div class="task-progress-header">
+                  <div class="task-status-info">
+                    <el-icon :size="16" class="status-icon text-blue-500"><Loading class="is-loading" /></el-icon>
+                    <span class="task-status-text">进行中子任务（{{ subtasksOf(s.id).length }}）</span>
+                  </div>
+                </div>
+                <div class="file-tasks-preview">
+                  <div v-for="st in subtasksOf(s.id)" :key="st.task_id" class="subtask-item">
+                    <div class="subtask-head">
+                      <el-tag :type="st.kind === 'download' ? 'success' : 'warning'" size="small">
+                        {{ st.kind === 'download' ? '下载' : '转存' }}
+                      </el-tag>
+                      <span class="file-name" :title="st.name">{{ st.name }}</span>
+                      <span class="subtask-stat">{{ subtaskStat(st) }}</span>
+                      <el-tag :type="subtaskStatusColor(st.status)" size="small">{{ subtaskStatusText(st.status) }}</el-tag>
+                    </div>
+                    <el-progress
+                      :percentage="clampPercent(st.progress)"
+                      :stroke-width="6"
+                      :show-text="false"
+                      :status="subtaskProgressStatus(st.status)"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div v-else class="no-active-task">
+              <span class="idle-text">当前无进行中子任务</span>
+              <el-button size="small" text type="primary" @click="select(s)">查看运行历史</el-button>
+            </div>
+          </el-card>
+        </div>
+      </el-col>
+
+      <!-- 右侧：选中订阅的详情 + 运行历史 -->
+      <el-col v-if="selected" :xs="24" :md="8">
+        <el-card shadow="hover" class="detail-card">
+          <template #header>
+            <span>订阅详情</span>
+          </template>
           <el-descriptions :column="1" border>
             <el-descriptions-item label="名称">{{ selected.name }}</el-descriptions-item>
             <el-descriptions-item label="分享链接">
@@ -150,13 +197,7 @@
             </el-descriptions-item>
           </el-descriptions>
         </el-card>
-        <el-card v-else shadow="hover" class="detail-card placeholder-card">
-          <el-empty description="请选择订阅查看详情" />
-        </el-card>
-      </el-col>
 
-      <!-- 右侧：运行历史（仅选中订阅时显示） -->
-      <el-col v-if="selected" :xs="24" :md="6">
         <el-card shadow="hover" class="runs-card">
           <template #header>
             <span>运行历史</span>
@@ -349,7 +390,7 @@ import { FilePickerModal } from '@/components/FilePicker'
 import { getConfig, updateRecentDirDebounced, setDefaultDownloadDir, type DownloadConfig } from '@/api/config'
 import {
   Plus, Edit, Delete, Refresh, Link,
-  FolderOpened, VideoPause, VideoPlay,
+  FolderOpened, VideoPause, VideoPlay, Loading,
 } from '@element-plus/icons-vue'
 import {
   type ShareSubscription,
@@ -362,10 +403,12 @@ import {
   type ConflictStrategy,
   type PollConfig,
   type ShareSyncWsEvent,
+  type ShareSyncSubtask,
   listSubscriptions, updateSubscription,
-  deleteSubscription, setSubscriptionEnabled, triggerSubscription, listRuns, getRun,
+  deleteSubscription, setSubscriptionEnabled, triggerSubscription, listRuns, getRun, listSubtasks,
 } from '@/api/shareSync'
-import { getWebSocketClient, connectWebSocket } from '@/utils/websocket'
+import { getWebSocketClient, connectWebSocket, type ConnectionState } from '@/utils/websocket'
+import { createAdaptivePoller } from '@/utils/backendHealth'
 
 const subscriptions = ref<ShareSubscription[]>([])
 const selected = ref<ShareSubscription | null>(null)
@@ -398,6 +441,18 @@ const ownerFilterCounts = computed(() => {
 const runs = ref<RunRecord[]>([])
 const currentRun = ref<RunDetail | null>(null)
 
+// 进行中子任务：subscription_id -> 子任务列表（WS item_progress 实时更新 + REST 轮询兜底）
+const activeSubtasks = ref<Map<string, ShareSyncSubtask[]>>(new Map())
+
+function subtasksOf(id: string): ShareSyncSubtask[] {
+  return activeSubtasks.value.get(id) ?? []
+}
+
+// 某订阅所属账号是否已登录（卡片级触发同步前置条件）
+function ownerLoggedIn(s: ShareSubscription): boolean {
+  return authStore.accounts.some(a => a.uid === s.owner_uid)
+}
+
 // 本地目录选择（与转存一致：FilePickerModal 选目录 + 最近目录联动）
 const downloadConfig = ref<DownloadConfig | null>(null)
 const dirPickerVisible = ref(false)
@@ -408,7 +463,7 @@ const dialogVisible = ref(false)
 const showTransferDialog = ref(false)
 const runDialogVisible = ref(false)
 const saving = ref(false)
-const triggering = ref(false)
+const triggeringId = ref<string | null>(null)
 const formRef = ref()
 const scheduledTime = ref<string>('03:00')
 
@@ -579,7 +634,8 @@ function onSyncCreated() {
   refresh()
 }
 
-function openEdit() {
+function openEdit(s?: ShareSubscription) {
+  if (s) selected.value = s
   if (!selected.value) return
   form.value = {
     name: selected.value.name,
@@ -784,11 +840,12 @@ function buildSanitizedPayload() {
   form.value.poll_config = normalizePollConfigForSubmit(form.value.poll_config)
 }
 
-async function removeSubscription() {
-  if (!selected.value) return
+async function removeSubscription(s?: ShareSubscription) {
+  const target = s ?? selected.value
+  if (!target) return
   try {
     await ElMessageBox.confirm(
-      `确定删除订阅 "${selected.value.name}"？历史快照与运行记录将一并清理。`,
+      `确定删除订阅 "${target.name}"？历史快照与运行记录将一并清理。`,
       '删除确认',
       { type: 'warning' }
     )
@@ -796,20 +853,24 @@ async function removeSubscription() {
     return
   }
   try {
-    await deleteSubscription(selected.value.id)
+    await deleteSubscription(target.id)
     ElMessage.success('已删除')
-    selected.value = null
-    runs.value = []
+    if (selected.value?.id === target.id) {
+      selected.value = null
+      runs.value = []
+    }
+    activeSubtasks.value.delete(target.id)
     await refresh()
   } catch (e) {
     ElMessage.error(`删除失败: ${getApiErrorMessage(e)}`)
   }
 }
 
-async function toggleEnabled() {
-  if (!selected.value) return
+async function toggleEnabled(s?: ShareSubscription) {
+  const target = s ?? selected.value
+  if (!target) return
   try {
-    await setSubscriptionEnabled(selected.value.id, !selected.value.enabled)
+    await setSubscriptionEnabled(target.id, !target.enabled)
     ElMessage.success('已切换启用状态')
     await refresh()
   } catch (e) {
@@ -817,17 +878,21 @@ async function toggleEnabled() {
   }
 }
 
-async function triggerNow() {
-  if (!selected.value) return
-  triggering.value = true
+async function triggerNow(s?: ShareSubscription) {
+  const target = s ?? selected.value
+  if (!target) return
+  triggeringId.value = target.id
   try {
-    await triggerSubscription(selected.value.id)
+    await triggerSubscription(target.id)
     ElMessage.success('已触发同步，结果将稍后出现在运行历史')
-    setTimeout(() => selected.value && loadRuns(selected.value.id), 1500)
+    setTimeout(() => {
+      if (selected.value?.id === target.id) loadRuns(target.id)
+      loadSubtasksFor(target.id)
+    }, 1500)
   } catch (e) {
     ElMessage.error(`触发失败: ${getApiErrorMessage(e)}`)
   } finally {
-    triggering.value = false
+    triggeringId.value = null
   }
 }
 
@@ -981,15 +1046,154 @@ function formatTime(ts: number): string {
   return new Date(ts * 1000).toLocaleString('zh-CN')
 }
 
+// ==================== 子任务进度（内联展示） ====================
+
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
+  const i = Math.min(sizes.length - 1, Math.floor(Math.log(bytes) / Math.log(k)))
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`
+}
+
+function formatSpeed(bps: number): string {
+  if (!bps || bps <= 0) return '0 B/s'
+  return `${formatBytes(bps)}/s`
+}
+
+function clampPercent(p: number): number {
+  if (!Number.isFinite(p)) return 0
+  return Math.min(100, Math.max(0, Math.round(p)))
+}
+
+// 下载段：已下载 / 总大小 · 速度；转存段：已完成 / 总文件数
+function subtaskStat(st: ShareSyncSubtask): string {
+  if (st.kind === 'download') {
+    const sizePart = `${formatBytes(st.downloaded)} / ${formatBytes(st.total)}`
+    return st.speed > 0 ? `${sizePart} · ${formatSpeed(st.speed)}` : sizePart
+  }
+  return `${st.downloaded}/${st.total} 文件`
+}
+
+const SUBTASK_TERMINAL = new Set(['completed', 'failed', 'cancelled', 'success'])
+
+function subtaskStatusText(status: string): string {
+  const map: Record<string, string> = {
+    pending: '等待中',
+    queued: '排队中',
+    preparing: '准备中',
+    waiting_transfer: '等待传输',
+    transferring: '转存中',
+    downloading: '下载中',
+    paused: '已暂停',
+    completed: '已完成',
+    success: '已完成',
+    failed: '失败',
+    cancelled: '已取消',
+  }
+  return map[status] || status
+}
+
+function subtaskStatusColor(status: string): 'success' | 'warning' | 'danger' | 'info' | 'primary' {
+  switch (status) {
+    case 'completed':
+    case 'success': return 'success'
+    case 'failed': return 'danger'
+    case 'cancelled':
+    case 'paused': return 'warning'
+    case 'transferring':
+    case 'downloading':
+    case 'preparing':
+    case 'waiting_transfer': return 'primary'
+    default: return 'info'
+  }
+}
+
+function subtaskProgressStatus(status: string): '' | 'success' | 'exception' | 'warning' {
+  if (status === 'failed') return 'exception'
+  if (status === 'paused') return 'warning'
+  return ''
+}
+
+// WS item_progress 到达：按 task_id upsert；终态则移除（与 REST「仅返回进行中」语义一致）
+function upsertSubtask(sid: string, st: ShareSyncSubtask) {
+  const list = activeSubtasks.value.get(sid) ?? []
+  const idx = list.findIndex(x => x.task_id === st.task_id)
+  if (SUBTASK_TERMINAL.has(st.status)) {
+    if (idx >= 0) list.splice(idx, 1)
+  } else if (idx >= 0) {
+    list[idx] = st
+  } else {
+    list.push(st)
+  }
+  if (list.length > 0) {
+    activeSubtasks.value.set(sid, list)
+  } else {
+    activeSubtasks.value.delete(sid)
+  }
+  // 触发 Map 的响应式刷新（Map 的原地修改不会触发 ref 更新）
+  activeSubtasks.value = new Map(activeSubtasks.value)
+}
+
+async function loadSubtasksFor(id: string) {
+  try {
+    const list = await listSubtasks(id)
+    const next = new Map(activeSubtasks.value)
+    if (list.length > 0) {
+      next.set(id, list)
+    } else {
+      next.delete(id)
+    }
+    activeSubtasks.value = next
+  } catch {
+    // 子任务加载失败不阻断页面（账号未就绪时后端返回空，异常时静默）
+  }
+}
+
+async function loadSubtasksForAll() {
+  await Promise.all(subscriptions.value.map(s => loadSubtasksFor(s.id)))
+}
+
 // ==================== 生命周期 ====================
 
 let unsubWs: (() => void) | null = null
+let unsubConnState: (() => void) | null = null
+const wsConnected = ref(false)
+
+const hasActiveSubtasks = computed(() => {
+  for (const list of activeSubtasks.value.values()) {
+    if (list.length > 0) return true
+  }
+  return false
+})
+
+// 自适应轮询器：WS 未连接且存在活跃子任务时兜底刷新 /subtasks
+const subtaskPoller = createAdaptivePoller(() => {
+  if (wsConnected.value || !hasActiveSubtasks.value) {
+    subtaskPoller.stop()
+    return
+  }
+  loadSubtasksForAll()
+}, { baseDelayMs: 2000, maxDelayMs: 30000 })
+
+function updateSubtaskPolling() {
+  if (!wsConnected.value && hasActiveSubtasks.value) {
+    subtaskPoller.start()
+  } else {
+    subtaskPoller.stop()
+  }
+}
+
+watch(hasActiveSubtasks, updateSubtaskPolling)
 
 onMounted(async () => {
   await refresh()
   if (subscriptions.value.length > 0 && !selected.value) {
     await select(subscriptions.value[0])
   }
+
+  // 初始拉取一次进行中子任务（与 AutoBackup 一致：进页面即有进度，不空窗）
+  await loadSubtasksForAll()
 
   // 加载下载目录配置（本地目标选目录时用作初始/默认目录，与转存一致）
   try {
@@ -1008,9 +1212,35 @@ onMounted(async () => {
     if (!evt || !evt.type) return
     const sid = evt.subscription_id
     if (!sid) return
+    if (evt.type === 'item_progress') {
+      upsertSubtask(sid, {
+        task_id: evt.task_id,
+        name: evt.name,
+        kind: evt.kind,
+        status: evt.status,
+        downloaded: evt.downloaded,
+        total: evt.total,
+        progress: evt.progress,
+        speed: evt.speed,
+        owner_uid: evt.owner_uid ?? 0,
+      })
+      return
+    }
     if (['subscription_created', 'subscription_updated', 'subscription_deleted', 'status_changed'].includes(evt.type)) {
       refresh()
-    } else if (sid === selected.value?.id) {
+      return
+    }
+    if (evt.type === 'run_started') {
+      // 新一轮开始：清掉旧的进度残留，随后由 item_progress / 轮询补齐
+      loadSubtasksFor(sid)
+    }
+    if (['run_completed', 'run_failed'].includes(evt.type)) {
+      // 一轮结束：清空该订阅的进行中子任务
+      const next = new Map(activeSubtasks.value)
+      next.delete(sid)
+      activeSubtasks.value = next
+    }
+    if (sid === selected.value?.id) {
       if (['run_started', 'run_completed', 'run_failed', 'diff_detected'].includes(evt.type)) {
         loadRuns(sid)
         if (['run_completed', 'run_failed'].includes(evt.type)) {
@@ -1020,10 +1250,23 @@ onMounted(async () => {
     }
   }
   unsubWs = ws.onShareSyncEvent(handler)
+
+  // 连接状态：断线时启动轮询兜底，恢复后停止并刷新一次进行中子任务
+  unsubConnState = ws.onConnectionStateChange((state: ConnectionState) => {
+    const wasConnected = wsConnected.value
+    wsConnected.value = state === 'connected'
+    updateSubtaskPolling()
+    if (!wasConnected && wsConnected.value) {
+      loadSubtasksForAll()
+    }
+  })
+  updateSubtaskPolling()
 })
 
 onUnmounted(() => {
   unsubWs?.()
+  unsubConnState?.()
+  subtaskPoller.stop()
 })
 </script>
 
@@ -1033,41 +1276,133 @@ onUnmounted(() => {
   .page-desc { color: #909399; font-size: 13px; margin: 0 0 16px; }
 }
 
-// 卡片填充视口高度，避免内容少时卡片过矮、右侧大片留白
-.list-card,
-.detail-card,
-.runs-card {
-  min-height: calc(100vh - 180px);
-}
-.placeholder-card {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.list-card .card-header,
-.detail-card .card-header,
-.runs-card .card-header {
+// ==================== 订阅卡片列表（自动备份风格） ====================
+.ss-toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  margin-bottom: 12px;
+  .ss-toolbar-title { font-weight: 500; color: #303133; }
+  .ss-toolbar-actions { display: flex; align-items: center; gap: 8px; }
 }
 
-.sub-list {
+.config-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 16px;
 }
-.sub-item {
-  padding: 10px 12px;
-  border: 1px solid #ebeef5;
-  border-radius: 6px;
+
+.config-card {
+  border-left: 4px solid #409eff;
+  transition: all 0.3s;
   cursor: pointer;
-  transition: all 0.2s;
-  &:hover { border-color: #409eff; }
-  &.active { background: #ecf5ff; border-color: #409eff; }
-  .sub-name { display: flex; align-items: center; gap: 6px; font-weight: 500; }
-  .sub-meta { font-size: 12px; color: #909399; margin-top: 4px; display: flex; gap: 6px; }
+
+  &.is-disabled { border-left-color: #c0c4cc; }
+  &.active { box-shadow: 0 0 0 1px #409eff inset; }
+  &:hover { transform: translateY(-2px); }
+}
+
+.config-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+.config-info { flex: 1; min-width: 0; }
+.config-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+  .direction-icon { flex-shrink: 0; color: #409eff; }
+  .config-name { font-size: 16px; font-weight: 500; color: #333; }
+}
+.config-path {
+  font-size: 12px;
+  color: #909399;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  .dot { color: #c0c4cc; }
+  .danger-text { color: #f56c6c; }
+}
+.config-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+// 进行中子任务（内联）
+.active-task-container {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid #ebeef5;
+}
+.active-task-card {
+  background: #f5f7fa;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.task-progress-header {
+  display: flex;
+  align-items: center;
+  padding: 10px 12px 4px;
+}
+.task-status-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  .task-status-text { font-size: 14px; font-weight: 500; color: #303133; }
+  .status-icon.text-blue-500 { color: #409eff; }
+  .is-loading { animation: ss-rotate 1.2s linear infinite; }
+}
+.file-tasks-preview { padding: 4px 12px 12px; }
+.subtask-item {
+  padding: 8px 0;
+  border-bottom: 1px solid #ebeef5;
+  &:last-child { border-bottom: none; }
+}
+.subtask-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  .file-name {
+    font-size: 13px;
+    color: #303133;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    min-width: 0;
+  }
+  .subtask-stat { font-size: 12px; color: #909399; flex-shrink: 0; }
+}
+
+.no-active-task {
+  margin-top: 12px;
+  padding: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #f5f7fa;
+  border-radius: 6px;
+  .idle-text { font-size: 13px; color: #909399; }
+}
+
+@keyframes ss-rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.detail-card { margin-bottom: 16px; }
+
+.detail-card .el-card__header,
+.runs-card .el-card__header {
+  font-weight: 500;
 }
 
 .target-line { margin: 4px 0; }
