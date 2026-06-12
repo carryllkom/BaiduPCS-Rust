@@ -1297,17 +1297,8 @@ onMounted(async () => {
       if (['run_started', 'run_completed', 'run_failed', 'diff_detected'].includes(evt.type)) {
         loadRuns(sid)
       }
-      if (evt.type === 'run_completed') {
-        const changed = evt.added + evt.modified + evt.removed
-        const detail = `新增 ${evt.added} / 修改 ${evt.modified} / 删除 ${evt.removed}`
-        if (evt.failed > 0) {
-          ElMessage.warning(`同步完成（部分失败 ${evt.failed}）：${detail}`)
-        } else if (changed === 0) {
-          ElMessage.success('同步完成：无变更')
-        } else {
-          ElMessage.success(`同步完成：${detail}`)
-        }
-      } else if (evt.type === 'run_failed') {
+      // run_completed 不再弹提示（结果可在运行历史里看）；仅失败时提醒。
+      if (evt.type === 'run_failed') {
         ElMessage.error(`同步失败：${evt.error || '未知错误'}`)
       }
     }
