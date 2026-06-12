@@ -141,6 +141,30 @@ export interface ShareSnapshot {
 }
 
 /**
+ * 分享同步「进行中子任务」进度快照（REST 轮询接口 + WS item_progress 广播共用同一形状）。
+ */
+export interface ShareSyncSubtask {
+  /** 底层任务 id（下载任务 id 或内部转存任务 id）；前端据此 upsert/去重 */
+  task_id: string
+  /** 文件名 / 展示名 */
+  name: string
+  /** 子任务种类：`transfer`（转存段）| `download`（下载段） */
+  kind: 'transfer' | 'download' | string
+  /** 状态字符串（downloading / completed / failed / transferring ...） */
+  status: string
+  /** 已完成字节（下载段）；转存段用已完成文件数 */
+  downloaded: number
+  /** 总字节（下载段）；转存段用总文件数 */
+  total: number
+  /** 进度百分比 0-100 */
+  progress: number
+  /** 瞬时速度（B/s，仅下载段有意义） */
+  speed: number
+  /** 订阅所属账号 uid */
+  owner_uid: number
+}
+
+/**
  * 分享同步 WS 事件载荷（与后端 ShareSyncEvent 对齐）
  */
 export type ShareSyncWsEvent =
@@ -152,6 +176,20 @@ export type ShareSyncWsEvent =
   | { type: 'run_started'; run_id: string; subscription_id: string; owner_uid?: number }
   | { type: 'run_completed'; run_id: string; subscription_id: string; added: number; modified: number; removed: number; failed: number; owner_uid?: number }
   | { type: 'run_failed'; run_id: string; subscription_id: string; error: string; owner_uid?: number }
+  | {
+      type: 'item_progress'
+      run_id: string
+      subscription_id: string
+      task_id: string
+      name: string
+      kind: 'transfer' | 'download' | string
+      status: string
+      downloaded: number
+      total: number
+      progress: number
+      speed: number
+      owner_uid?: number
+    }
 
 // ==================== API ====================
 
@@ -201,6 +239,17 @@ export async function listRuns(id: string, page = 1, pageSize = 20): Promise<Run
 
 export async function getRun(runId: string): Promise<RunDetail> {
   const r = await rawApiClient.get<{ success: boolean; data: RunDetail }>(`${BASE}/runs/${runId}`)
+  return r.data.data
+}
+
+/**
+ * 列出某订阅当前「进行中」的子任务（下载段 + 内部转存段）。
+ * WS `item_progress` 断线时作为轮询兜底；与 WS 广播共用同一数据形状。
+ */
+export async function listSubtasks(id: string): Promise<ShareSyncSubtask[]> {
+  const r = await rawApiClient.get<{ success: boolean; data: ShareSyncSubtask[] }>(
+    `${BASE}/subscriptions/${id}/subtasks`,
+  )
   return r.data.data
 }
 
