@@ -223,7 +223,7 @@
                     <template #default>
                       <div style="line-height: 1.8">
                         系统会根据文件大小和您的VIP等级自动选择最优分片大小：<br/>
-                        • 小文件（<5MB）使用 256KB 分片<br/>
+                        • 小文件（&lt;5MB）使用 256KB 分片<br/>
                         • 中等文件（5-10MB）使用 512KB 分片<br/>
                         • 中大型文件（10-500MB）使用 1MB-4MB 分片<br/>
                         • 大文件（≥500MB）使用 5MB 分片<br/>
@@ -951,7 +951,6 @@ import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { useIsMobile } from '@/utils/responsive'
 import { useConfigStore } from '@/stores/config'
-import { useAuthStore } from '@/stores/auth'
 import type { AppConfig, ProxyType, ProxyRuntimeStatus } from '@/api/config'
 import { getRecommendedConfig, resetToRecommended, getProxyStatus, testProxyConnection } from '@/api/config'
 import type { UploadConflictStrategy } from '@/api/upload'
@@ -1002,7 +1001,6 @@ import {
 } from '@/api/autobackup'
 
 const configStore = useConfigStore()
-const authStore = useAuthStore()
 const route = useRoute()
 
 // 响应式检测

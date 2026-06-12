@@ -345,7 +345,7 @@ function openTaskDetail(tasks: BackupTask[], configName: string) {
 // 打开历史任务（获取所有任务并打开详情）
 async function openHistoryTasks(config: BackupConfig) {
   try {
-    const { tasks, total } = await listBackupTasks(config.id, 1, 50)
+    const { tasks } = await listBackupTasks(config.id, 1, 50)
     if (tasks.length > 0) {
       // 打开任务列表详情
       openTaskDetail(tasks, config.name)
