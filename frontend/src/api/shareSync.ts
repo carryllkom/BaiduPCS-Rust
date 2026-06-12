@@ -10,6 +10,13 @@ export type ConflictStrategy = 'overwrite' | 'versioned' | 'skip'
 export type PollMode = 'disabled' | 'interval' | 'scheduled'
 export type TargetKind = 'netdisk' | 'local'
 
+/**
+ * 本地同步模式（与后端 `LocalSyncMode` 对齐，serde snake_case）：
+ * - `share_direct`：分享直下 —— 转存到临时目录 → 下载本地 → 清理（网盘不留存，默认/兼容老订阅）。
+ * - `transfer_and_download`：转存并下载 —— 转存到网盘目标 remote_path 保留 → 再下载本地（需同订阅有网盘目标）。
+ */
+export type LocalSyncMode = 'share_direct' | 'transfer_and_download'
+
 export interface NetdiskTarget {
   kind: 'netdisk'
   remote_path: string
@@ -21,6 +28,8 @@ export interface LocalTarget {
   kind: 'local'
   local_path: string
   conflict_strategy?: ConflictStrategy | null
+  /** 本地同步模式；缺省时后端按 `share_direct` 反序列化（兼容老订阅） */
+  mode?: LocalSyncMode
 }
 
 export type SyncTarget = NetdiskTarget | LocalTarget
