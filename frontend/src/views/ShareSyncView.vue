@@ -98,14 +98,18 @@
             <!-- 进行中子任务（内联展示，无需展开；转存段 / 下载段各自独立进度条） -->
             <div v-if="subtasksOf(s.id).length" class="active-task-container">
               <div class="active-task-card">
-                <div class="task-progress-header">
+                <div class="task-progress-header is-toggle" @click.stop="toggleSubtasks(s.id)">
                   <div class="task-status-info">
                     <el-icon :size="16" class="status-icon text-blue-500"><Loading class="is-loading" /></el-icon>
                     <span class="task-status-text">进行中子任务（{{ subtasksOf(s.id).length }}）</span>
                   </div>
+                  <el-icon :size="14" class="toggle-icon">
+                    <ArrowDown v-if="subtasksExpanded(s.id)" />
+                    <ArrowRight v-else />
+                  </el-icon>
                 </div>
-                <div class="file-tasks-preview">
-                  <div v-for="st in subtasksOf(s.id)" :key="st.task_id" class="subtask-item">
+                <div v-if="subtasksExpanded(s.id)" class="file-tasks-preview">
+                  <div v-for="st in subtasksCapped(s.id)" :key="st.task_id" class="subtask-item">
                     <div class="subtask-head">
                       <el-tag :type="st.kind === 'download' ? 'success' : 'warning'" size="small">
                         {{ st.kind === 'download' ? '下载' : '转存' }}
@@ -120,6 +124,9 @@
                       :show-text="false"
                       :status="subtaskProgressStatus(st.status)"
                     />
+                  </div>
+                  <div v-if="subtasksOverflow(s.id) > 0" class="subtask-overflow">
+                    仅显示前 {{ SUBTASK_RENDER_CAP }} 个，另有 {{ subtasksOverflow(s.id) }} 个进行中…
                   </div>
                 </div>
               </div>
@@ -395,7 +402,7 @@ import { FilePickerModal } from '@/components/FilePicker'
 import { getConfig, updateRecentDirDebounced, setDefaultDownloadDir, type DownloadConfig } from '@/api/config'
 import {
   Plus, Edit, Delete, Refresh, Link,
-  FolderOpened, VideoPause, VideoPlay, Loading, Clock,
+  FolderOpened, VideoPause, VideoPlay, Loading, Clock, ArrowDown, ArrowRight,
 } from '@element-plus/icons-vue'
 import {
   type ShareSubscription,
@@ -454,6 +461,27 @@ const activeSubtasks = ref<Map<string, ShareSyncSubtask[]>>(new Map())
 
 function subtasksOf(id: string): ShareSyncSubtask[] {
   return activeSubtasks.value.get(id) ?? []
+}
+
+// 子任务列表默认折叠（几千文件时不铺满卡片）；按订阅记忆展开态。
+const expandedSubtasks = ref<Set<string>>(new Set())
+function subtasksExpanded(id: string): boolean {
+  return expandedSubtasks.value.has(id)
+}
+function toggleSubtasks(id: string) {
+  const next = new Set(expandedSubtasks.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  expandedSubtasks.value = next
+}
+
+// 展开时也只渲染前 N 行（避免上千个 el-progress 撑爆 DOM），其余用计数提示。
+const SUBTASK_RENDER_CAP = 200
+function subtasksCapped(id: string): ShareSyncSubtask[] {
+  return subtasksOf(id).slice(0, SUBTASK_RENDER_CAP)
+}
+function subtasksOverflow(id: string): number {
+  return Math.max(0, subtasksOf(id).length - SUBTASK_RENDER_CAP)
 }
 
 // 某订阅所属账号是否已登录（卡片级触发同步前置条件）
@@ -1478,6 +1506,8 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   padding: 10px 12px 4px;
+  &.is-toggle { cursor: pointer; user-select: none; }
+  .toggle-icon { margin-left: auto; color: #909399; }
 }
 .task-status-info {
   display: flex;
@@ -1487,7 +1517,18 @@ onUnmounted(() => {
   .status-icon.text-blue-500 { color: #409eff; }
   .is-loading { animation: ss-rotate 1.2s linear infinite; }
 }
-.file-tasks-preview { padding: 4px 12px 12px; }
+// 固定高度 + 滚动条：几千个子任务时不再撑满卡片
+.file-tasks-preview {
+  padding: 4px 12px 12px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.subtask-overflow {
+  padding: 8px 0 2px;
+  font-size: 12px;
+  color: #909399;
+  text-align: center;
+}
 .subtask-item {
   padding: 8px 0;
   border-bottom: 1px solid #ebeef5;
