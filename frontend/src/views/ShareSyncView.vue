@@ -138,7 +138,12 @@
       <el-col v-if="selected" :xs="24" :md="8">
         <el-card shadow="hover" class="detail-card">
           <template #header>
-            <span>订阅详情</span>
+            <div class="detail-card-header">
+              <span>订阅详情</span>
+              <el-button text :icon="Clock" @click="runsDialogVisible = true">
+                运行历史<span v-if="runs.length > 0">（{{ runs.length }}）</span>
+              </el-button>
+            </div>
           </template>
           <el-descriptions :column="1" border>
             <el-descriptions-item label="名称">{{ selected.name }}</el-descriptions-item>
@@ -199,33 +204,6 @@
               <el-tag v-else type="info" size="small">关闭</el-tag>
             </el-descriptions-item>
           </el-descriptions>
-        </el-card>
-
-        <el-card shadow="hover" class="runs-card">
-          <template #header>
-            <span>运行历史</span>
-          </template>
-          <el-empty v-if="runs.length === 0" description="暂无运行" />
-          <el-timeline v-else>
-            <el-timeline-item
-              v-for="r in runs"
-              :key="r.id"
-              :timestamp="formatTime(r.started_at)"
-              :type="runStatusType(r.status)"
-            >
-              <div @click="openRun(r.id)" class="run-item">
-                <strong>{{ describeRunStatus(r.status) }}</strong>
-                <div class="run-stats">
-                  总 {{ runTotalCount(r) }} / 需处理 {{ runChangedCount(r) }}
-                  <span> +{{ r.added_count }}</span>
-                  <span> 覆盖 {{ runOverwrittenCount(r) }}</span>
-                  <span> 一致跳过 {{ runUnchangedCount(r) }}</span>
-                  <span v-if="runSkippedCount(r) > 0" style="color: #e6a23c"> 跳过 {{ runSkippedCount(r) }}</span>
-                  <span v-if="r.failed_count > 0" style="color: #f56c6c"> 失败 {{ r.failed_count }}</span>
-                </div>
-              </div>
-            </el-timeline-item>
-          </el-timeline>
         </el-card>
       </el-col>
     </el-row>
@@ -363,6 +341,31 @@
       </div>
     </el-dialog>
 
+    <!-- 运行历史对话框 -->
+    <el-dialog v-model="runsDialogVisible" title="运行历史" width="640px">
+      <el-empty v-if="runs.length === 0" description="暂无运行" />
+      <el-timeline v-else>
+        <el-timeline-item
+          v-for="r in runs"
+          :key="r.id"
+          :timestamp="formatTime(r.started_at)"
+          :type="runStatusType(r.status)"
+        >
+          <div @click="openRun(r.id)" class="run-item">
+            <strong>{{ describeRunStatus(r.status) }}</strong>
+            <div class="run-stats">
+              总 {{ runTotalCount(r) }} / 需处理 {{ runChangedCount(r) }}
+              <span> +{{ r.added_count }}</span>
+              <span> 覆盖 {{ runOverwrittenCount(r) }}</span>
+              <span> 一致跳过 {{ runUnchangedCount(r) }}</span>
+              <span v-if="runSkippedCount(r) > 0" style="color: #e6a23c"> 跳过 {{ runSkippedCount(r) }}</span>
+              <span v-if="r.failed_count > 0" style="color: #f56c6c"> 失败 {{ r.failed_count }}</span>
+            </div>
+          </div>
+        </el-timeline-item>
+      </el-timeline>
+    </el-dialog>
+
     <!-- 本地目录选择（对齐转存：FilePickerModal 选目录） -->
     <FilePickerModal
         v-model="dirPickerVisible"
@@ -399,7 +402,7 @@ import { FilePickerModal } from '@/components/FilePicker'
 import { getConfig, updateRecentDirDebounced, setDefaultDownloadDir, type DownloadConfig } from '@/api/config'
 import {
   Plus, Edit, Delete, Refresh, Link,
-  FolderOpened, VideoPause, VideoPlay, Loading,
+  FolderOpened, VideoPause, VideoPlay, Loading, Clock,
 } from '@element-plus/icons-vue'
 import {
   type ShareSubscription,
@@ -473,6 +476,7 @@ const dialogVisible = ref(false)
 // 创建入口：复用转存对话框
 const showTransferDialog = ref(false)
 const runDialogVisible = ref(false)
+const runsDialogVisible = ref(false)
 const saving = ref(false)
 const triggeringId = ref<string | null>(null)
 const formRef = ref()
@@ -1476,9 +1480,14 @@ onUnmounted(() => {
 
 .detail-card { margin-bottom: 16px; }
 
-.detail-card .el-card__header,
-.runs-card .el-card__header {
+.detail-card .el-card__header {
   font-weight: 500;
+}
+
+.detail-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .target-line { margin: 4px 0; }
