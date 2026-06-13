@@ -979,8 +979,22 @@ pub struct ShareSyncSubtask {
     pub progress: f64,
     /// 瞬时速度(B/s,仅下载段有意义)
     pub speed: u64,
+    /// 预计剩余时间(秒,仅下载段且 speed>0 时有值)，与自动备份 `eta_seconds` 对齐
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_seconds: Option<u64>,
     /// 订阅所属账号 uid
     pub owner_uid: u64,
+}
+
+/// 由「已下载/总字节/瞬时速度」推算预计剩余时间(秒)。
+///
+/// 仅在 `speed > 0` 且 `total > downloaded` 时返回 `Some`，否则 `None`
+/// (与自动备份 `SpeedCalculator::calculate_eta` 同义)。
+fn compute_eta_seconds(downloaded: u64, total: u64, speed: u64) -> Option<u64> {
+    if speed == 0 || total <= downloaded {
+        return None;
+    }
+    Some((total - downloaded) / speed)
 }
 
 fn basename_of(path: &str) -> String {
@@ -1002,8 +1016,11 @@ pub async fn collect_share_sync_subtasks(
     let cfg = share_sync_backup_config_id(subscription_id);
     let mut out: Vec<ShareSyncSubtask> = Vec::new();
 
+    // 下载管理器句柄：单文件下载段 + 文件夹聚合段(按 group 汇总子任务速度)共用。
+    let dm_handle = transfer.download_manager_handle().await;
+
     // 下载段:复用自动备份同款查询(is_backup && backup_config_id==cfg)
-    if let Some(dm) = transfer.download_manager_handle().await {
+    if let Some(dm) = dm_handle.as_ref() {
         for t in dm.get_tasks_by_backup_config(&cfg).await {
             let name = t
                 .local_path
@@ -1025,6 +1042,7 @@ pub async fn collect_share_sync_subtasks(
                 total: t.total_size,
                 progress,
                 speed: t.speed,
+                eta_seconds: compute_eta_seconds(t.downloaded_size, t.total_size, t.speed),
                 owner_uid,
             });
         }
@@ -1050,6 +1068,7 @@ pub async fn collect_share_sync_subtasks(
                 total: t.total_count as u64,
                 progress,
                 speed: 0,
+                eta_seconds: None,
                 owner_uid,
             });
         }
@@ -1060,6 +1079,18 @@ pub async fn collect_share_sync_subtasks(
     // 也不走 is_backup 的 get_tasks_by_backup_config,因此在此按文件夹级聚合进度。
     if let Some(fdm) = transfer.folder_download_manager_handle().await {
         for f in fdm.get_folders_by_backup_config(&cfg).await {
+            // 文件夹本身不持有速度，按其活跃子文件任务(group_id==folder.id)的
+            // 瞬时速度求和聚合，口径与文件夹进度广播器(folder_manager)一致。
+            let speed: u64 = if let Some(dm) = dm_handle.as_ref() {
+                dm.get_tasks_by_group(&f.id)
+                    .await
+                    .iter()
+                    .filter(|t| t.status == crate::downloader::TaskStatus::Downloading)
+                    .map(|t| t.speed)
+                    .sum()
+            } else {
+                0
+            };
             out.push(ShareSyncSubtask {
                 task_id: format!("folder:{}", f.id),
                 name: f.name.clone(),
@@ -1068,7 +1099,8 @@ pub async fn collect_share_sync_subtasks(
                 downloaded: f.downloaded_size,
                 total: f.total_size,
                 progress: f.progress(),
-                speed: 0,
+                speed,
+                eta_seconds: compute_eta_seconds(f.downloaded_size, f.total_size, speed),
                 owner_uid,
             });
         }
@@ -1098,6 +1130,7 @@ async fn emit_subtask_progress(
             total: s.total,
             progress: s.progress,
             speed: s.speed,
+            eta_seconds: s.eta_seconds,
             owner_uid,
         });
     }

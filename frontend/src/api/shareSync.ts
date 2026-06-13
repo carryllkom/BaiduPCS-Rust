@@ -175,6 +175,8 @@ export interface ShareSyncSubtask {
   progress: number
   /** 瞬时速度（B/s，仅下载段有意义） */
   speed: number
+  /** 预计剩余时间（秒，仅下载段且 speed>0 时有值） */
+  eta_seconds?: number | null
   /** 订阅所属账号 uid */
   owner_uid: number
 }
@@ -203,6 +205,7 @@ export type ShareSyncWsEvent =
       total: number
       progress: number
       speed: number
+      eta_seconds?: number | null
       owner_uid?: number
     }
 

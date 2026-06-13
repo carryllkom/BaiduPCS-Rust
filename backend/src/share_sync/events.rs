@@ -118,6 +118,9 @@ pub enum ShareSyncEvent {
         progress: f64,
         /// 瞬时速度(B/s,仅下载段有意义)
         speed: u64,
+        /// 预计剩余时间(秒,仅下载段且 speed>0 时有值)，与自动备份对齐
+        #[serde(default)]
+        eta_seconds: Option<u64>,
         #[serde(default)]
         owner_uid: u64,
     },
@@ -285,6 +288,7 @@ mod tests {
             total: 100,
             progress: 50.0,
             speed: 1024,
+            eta_seconds: Some(50),
             owner_uid: 9,
         };
         assert_eq!(e.subscription_id(), "s1");
