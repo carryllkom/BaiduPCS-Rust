@@ -26,6 +26,22 @@ use tracing::{debug, error, info, warn};
 /// 这里取较保守的默认值以尽量避免触发;可用环境变量 `BAIDUPCS_DELETE_CHUNK_SIZE` 覆盖。
 const DELETE_CHUNK_SIZE: usize = 100;
 
+/// 分块删除每批之间的基础间隔（毫秒）。配合 ±`DELETE_BATCH_JITTER_RATIO` 抖动,
+/// 降低「连续高频删除」被频率风控的概率。可用 `BAIDUPCS_DELETE_BATCH_DELAY_MS` 覆盖。
+const DELETE_BATCH_DELAY_MS: u64 = 400;
+
+/// 分块删除批次间隔的抖动比例（±比例）。可用 `BAIDUPCS_DELETE_BATCH_JITTER_RATIO` 覆盖。
+const DELETE_BATCH_JITTER_RATIO: f64 = 0.5;
+
+/// 单批删除命中 errno=132 时的退避重试次数（不含首次）。
+/// 重试用指数退避 + 抖动等待,给账号的瞬时风控一个缓冲;耗尽仍 132 才上报需人工验证。
+/// 可用 `BAIDUPCS_DELETE_RISK_RETRIES` 覆盖（设 0 关闭重试）。
+const DELETE_RISK_RETRIES: u32 = 3;
+
+/// errno=132 退避重试的基础等待（毫秒）,第 n 次等待 ≈ base × 2^n ± 抖动。
+/// 可用 `BAIDUPCS_DELETE_RISK_BACKOFF_MS` 覆盖。
+const DELETE_RISK_BACKOFF_MS: u64 = 1500;
+
 /// 百度网盘客户端
 #[derive(Debug, Clone)]
 pub struct NetdiskClient {
@@ -4109,24 +4125,92 @@ impl NetdiskClient {
             .chain(direct_files.chunks(chunk_size))
             .chain(container_dirs.chunks(chunk_size))
             .collect();
+        let risk_retries = std::env::var("BAIDUPCS_DELETE_RISK_RETRIES")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(DELETE_RISK_RETRIES);
         for (i, batch) in batches.iter().enumerate() {
-            let r = self.delete_files(batch).await?;
+            // 单批删除:命中 errno=132 时按指数退避 + 抖动重试,给瞬时风控一个缓冲;
+            // 重试耗尽仍 132 才认定账号被标记,上报让用户去网页端完成安全验证。
+            let mut attempt = 0u32;
+            let r = loop {
+                let r = self.delete_files(batch).await?;
+                if r.errno == Some(132) && attempt < risk_retries {
+                    let backoff = Self::delete_risk_backoff_delay(attempt);
+                    warn!(
+                        "分块删除第 {} 批命中 errno=132,退避重试 {}/{},等待 {:?}",
+                        i + 1,
+                        attempt + 1,
+                        risk_retries,
+                        backoff
+                    );
+                    tokio::time::sleep(backoff).await;
+                    attempt += 1;
+                    continue;
+                }
+                break r;
+            };
             if r.success {
                 deleted += batch.len();
             } else if r.errno == Some(132) {
-                // 拆分后仍被风控:账号已被标记,直接上报让用户去验证。
-                warn!("分块删除第 {} 批仍命中 errno=132,账号疑似被风控标记,交由上层引导验证", i + 1);
+                // 退避重试后仍被风控:账号已被标记,拆分也无济于事,上报让用户去验证。
+                warn!(
+                    "分块删除第 {} 批退避 {} 次后仍命中 errno=132,账号疑似被风控标记,交由上层引导验证",
+                    i + 1,
+                    risk_retries
+                );
                 return Ok(r);
             } else {
                 return Ok(r);
             }
-            // 批次之间轻微节流,降低被频率风控的概率。
+            // 批次之间随机抖动节流,降低被频率风控的概率。
             if i + 1 < batches.len() {
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                tokio::time::sleep(Self::delete_batch_delay()).await;
             }
         }
 
         Ok(DeleteFilesResponse::success(deleted))
+    }
+
+    /// 分块删除批次之间的等待:基础间隔 ± 抖动（避免固定节奏被频率风控识别）。
+    fn delete_batch_delay() -> std::time::Duration {
+        use rand::Rng;
+        let base = std::env::var("BAIDUPCS_DELETE_BATCH_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DELETE_BATCH_DELAY_MS);
+        let ratio = std::env::var("BAIDUPCS_DELETE_BATCH_JITTER_RATIO")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|r| *r >= 0.0)
+            .unwrap_or(DELETE_BATCH_JITTER_RATIO);
+        let delta = (base as f64 * ratio) as i64;
+        let offset = if delta > 0 {
+            rand::thread_rng().gen_range(-delta..=delta)
+        } else {
+            0
+        };
+        let ms = (base as i64 + offset).max(0) as u64;
+        std::time::Duration::from_millis(ms)
+    }
+
+    /// errno=132 退避重试的第 `attempt`（从 0 起）次等待:base × 2^attempt ± 抖动。
+    fn delete_risk_backoff_delay(attempt: u32) -> std::time::Duration {
+        use rand::Rng;
+        let base = std::env::var("BAIDUPCS_DELETE_RISK_BACKOFF_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DELETE_RISK_BACKOFF_MS);
+        let factor = 1u64 << attempt.min(5); // 2^attempt,封顶避免过长
+        let scaled = base.saturating_mul(factor);
+        let delta = (scaled / 4) as i64; // ±25% 抖动
+        let offset = if delta > 0 {
+            rand::thread_rng().gen_range(-delta..=delta)
+        } else {
+            0
+        };
+        let ms = (scaled as i64 + offset).max(0) as u64;
+        std::time::Duration::from_millis(ms)
     }
 
     /// 列出某目录下的全部子项(自动翻页)。若该路径不是目录(列表接口返回非 0 errno),返回 `None`。
@@ -5322,6 +5406,28 @@ mod transfer_preservation_tests {
         assert_eq!(aw.safesign.as_deref(), Some("sig"));
         assert_eq!(aw.safetpl.as_deref(), Some("tpl"));
         assert_eq!(r.verify_scene, Some(1));
+    }
+
+    #[test]
+    fn test_delete_batch_delay_within_bounds() {
+        // 默认 base=400ms ± 50% → [200, 600]ms。多采样确保落在区间内。
+        let max = ((super::DELETE_BATCH_DELAY_MS as f64) * (1.0 + super::DELETE_BATCH_JITTER_RATIO)) as u128;
+        let min = ((super::DELETE_BATCH_DELAY_MS as f64) * (1.0 - super::DELETE_BATCH_JITTER_RATIO)) as u128;
+        for _ in 0..200 {
+            let ms = super::NetdiskClient::delete_batch_delay().as_millis();
+            assert!(ms <= max, "delay {ms} 超过上界 {max}");
+            assert!(ms >= min, "delay {ms} 低于下界 {min}");
+        }
+    }
+
+    #[test]
+    fn test_delete_risk_backoff_grows_with_attempt() {
+        // 退避随 attempt 指数增长(允许抖动,用宽松下界比较各档中位)。
+        let d0 = super::NetdiskClient::delete_risk_backoff_delay(0).as_millis();
+        let d2 = super::NetdiskClient::delete_risk_backoff_delay(2).as_millis();
+        // attempt=0 ≈ base(1500)±25% ≤ ~1875；attempt=2 ≈ base*4(6000)±25% ≥ 4500
+        assert!(d0 <= 1900, "attempt0 退避 {d0} 偏大");
+        assert!(d2 >= 4000, "attempt2 退避 {d2} 未随次数增长");
     }
 
     #[test]
