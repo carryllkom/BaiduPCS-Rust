@@ -88,31 +88,34 @@ impl ShareSyncManager {
     pub async fn new(cfg: ManagerConfig) -> Result<Arc<Self>, ShareSyncError> {
         let persistence = Arc::new(ShareSyncPersistence::new(&cfg.db_path)?);
 
-        // 启动期 stale-run 自愈:把崩溃/kill 后留下的 status='running' 但实际无
-        // manager task 在跑的孤儿 run 修复为 Failed,避免前端永远显示"运行中"。
-        // d17ae3f1 的 21384bbe 卡 1h47min 就是这个漏网。可用 env
-        // BAIDUPCS_STALE_FIXUP_ENABLED=0 关闭。阈值固定 120 分钟,兼顾安全与长 run。
+        // 启动期 stale-run 自愈:进程重启后,上次留下的 status='running' run 都是
+        // 孤儿(内存里的 run task 已随进程退出)。**不再粗暴标 Failed**——那对用户是
+        // "明明只是重启却显示失败"(用户反馈:"重启后那些要自动恢复跑吧,就跟自动备份
+        // 一样,怎么能直接标记失败呢")。改为标 Interrupted(中断),并在订阅恢复后对其
+        // 所属(且启用)订阅自动重跑一次:同步是增量的(基线只在成功后推进),被中断的
+        // run 没推进基线,重跑会重新 diff 把没跑完的补上。可用 env
+        // BAIDUPCS_STALE_FIXUP_ENABLED=0 关闭收编;BAIDUPCS_SHARE_SYNC_RESUME_ON_STARTUP=0
+        // 仅收编不自动重跑(交给下个轮询周期)。
         let stale_fixup_enabled = std::env::var("BAIDUPCS_STALE_FIXUP_ENABLED")
             .ok()
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(true);
+        let resume_on_startup = std::env::var("BAIDUPCS_SHARE_SYNC_RESUME_ON_STARTUP")
+            .ok()
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(true);
+        // 被中断、待自动重跑的订阅 id(去重)。在订阅恢复后才知道哪些 enabled。
+        let mut interrupted_sub_ids: Vec<String> = Vec::new();
         if stale_fixup_enabled {
-            match persistence.mark_stale_runs_failed(120) {
-                Ok(stale) if !stale.is_empty() => {
+            match persistence.mark_running_runs_interrupted() {
+                Ok(interrupted) if !interrupted.is_empty() => {
                     info!(
-                        "share_sync 启动自愈: 收编 {} 条 stale running run",
-                        stale.len()
+                        "share_sync 启动自愈: 收编 {} 条中断 run,稍后自动重跑",
+                        interrupted.len()
                     );
-                    // 不在这里 publish — publisher 还没传进来; 用 cfg.publisher 的 clone
-                    if let Some(ref pubr) = cfg.publisher {
-                        for rec in &stale {
-                            pubr.publish(ShareSyncEvent::RunFailed {
-                                subscription_id: rec.subscription_id.clone(),
-                                run_id: rec.run_id.clone(),
-                                error: "stale_run_killed_on_startup".to_string(),
-                                reason: Some("stale_run".to_string()),
-                                owner_uid: rec.owner_uid,
-                            });
+                    for rec in &interrupted {
+                        if !interrupted_sub_ids.contains(&rec.subscription_id) {
+                            interrupted_sub_ids.push(rec.subscription_id.clone());
                         }
                     }
                 }
@@ -163,7 +166,75 @@ impl ShareSyncManager {
             "ShareSyncManager 初始化完成: 恢复 {} 条订阅",
             manager.subscriptions.len()
         );
+
+        // 对被中断的、且仍启用的订阅自动重跑一次(像自动备份重启续跑)。只保留 enabled
+        // 的——已禁用的订阅不该被启动悄悄唤醒。后台 spawn,best-effort:账号尚未就绪时
+        // execute_one 在创建 run 前就报错(不留失败记录),退避重试若干次;始终不行则交给
+        // 调度器在下个轮询周期补上,不阻塞启动。
+        if resume_on_startup && !interrupted_sub_ids.is_empty() {
+            let resume_ids: Vec<String> = interrupted_sub_ids
+                .into_iter()
+                .filter(|id| {
+                    manager
+                        .subscriptions
+                        .get(id)
+                        .map(|s| s.enabled)
+                        .unwrap_or(false)
+                })
+                .collect();
+            if !resume_ids.is_empty() {
+                let mgr = Arc::clone(&manager);
+                tokio::spawn(async move {
+                    mgr.resume_interrupted_runs(resume_ids).await;
+                });
+            }
+        }
+
         Ok(manager)
+    }
+
+    /// 启动期对被中断的订阅自动重跑一次。best-effort:先**轮询等账号登录态就绪**
+    /// 再触发,避免账号没恢复时 execute_one 反复在「抓取阶段」失败、刷出一堆失败 run。
+    /// 等到就绪(或超时)后只触发一次;触发不成则交给轮询调度兜底。供 `new` 后台调用。
+    async fn resume_interrupted_runs(self: Arc<Self>, sub_ids: Vec<String>) {
+        // 给账号登录态恢复留点时间(进程刚起,resolver 可能还没就绪)。
+        const RESUME_INITIAL_DELAY_SECS: u64 = 5;
+        const READY_MAX_ATTEMPTS: u32 = 12;
+        const READY_RETRY_DELAY_SECS: u64 = 10;
+        tokio::time::sleep(std::time::Duration::from_secs(RESUME_INITIAL_DELAY_SECS)).await;
+        for id in sub_ids {
+            let owner_uid = match self.get_subscription(&id) {
+                Some(s) => s.owner_uid,
+                None => continue, // 订阅启动后被删,跳过
+            };
+            // 等账号(网盘客户端 + 转存管理器)就绪——execute_one 在抓取前需要它们。
+            let mut ready = false;
+            for _ in 0..READY_MAX_ATTEMPTS {
+                let has_netdisk = self.resolver.netdisk_client(owner_uid).await.is_some();
+                let has_transfer = self.resolver.transfer_manager(owner_uid).await.is_some();
+                if has_netdisk && has_transfer {
+                    ready = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(READY_RETRY_DELAY_SECS)).await;
+            }
+            if !ready {
+                warn!(
+                    "share_sync 启动续跑: 订阅 {} 所属账号(uid={})迟迟未就绪,交给轮询调度兜底",
+                    id, owner_uid
+                );
+                continue;
+            }
+            match self.execute_one(&id).await {
+                Ok(_) => info!("share_sync 启动续跑: 订阅 {} 已重新同步", id),
+                // 调度器抢先触发了 —— 正常,无需重复。
+                Err(ShareSyncError::AlreadyRunning(_)) => {}
+                Err(e) => warn!(
+                    "share_sync 启动续跑: 订阅 {} 触发失败({}),交给轮询调度兜底",
+                    id, e
+                ),
+            }
+        }
     }
 
     /// 一次性导入旧版 `subscriptions.json` 到主库，成功后把文件改名为 `.migrated`。

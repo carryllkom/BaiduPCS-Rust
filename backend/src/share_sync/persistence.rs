@@ -570,6 +570,62 @@ impl ShareSyncPersistence {
         Ok(stale)
     }
 
+    /// 启动期把**所有** `status='running'` 的 run 标记为 `Interrupted`,返回被收编
+    /// 的 run 列表(供 manager 在启动时自动重跑)。
+    ///
+    /// 与 `mark_stale_runs_failed` 的区别:
+    /// - 不标 `Failed` 而是 `Interrupted`(中断,非失败)——进程重启打断的 run 不该
+    ///   显示成失败(用户反馈:"怎么能直接标记失败呢")。
+    /// - 不设 cutoff:`ShareSyncManager::new` 只在进程启动时调一次,那一刻任何
+    ///   `running` 行都必然是上次进程残留的孤儿(内存里的 run task 已随进程退出),
+    ///   所以全部收编,manager 随后对其所属(且启用)的订阅自动重跑一次。
+    /// - 同步是增量的(基线快照只在成功后推进),被中断的 run 没推进基线,重跑会
+    ///   重新 diff 把没跑完的项补上。
+    pub fn mark_running_runs_interrupted(&self) -> Result<Vec<StaleRunRecord>, ShareSyncError> {
+        let now = chrono::Utc::now().timestamp();
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT r.id, r.subscription_id, r.started_at, COALESCE(s.owner_uid, 0)
+             FROM share_sync_runs r
+             LEFT JOIN share_subscriptions s ON s.id = r.subscription_id
+             WHERE r.status = ?1",
+        )?;
+        let rows = stmt.query_map(params![RunStatus::Running.as_str()], |row| {
+            Ok(StaleRunRecord {
+                run_id: row.get(0)?,
+                subscription_id: row.get(1)?,
+                started_at: row.get(2)?,
+                owner_uid: row.get::<_, i64>(3)? as u64,
+            })
+        })?;
+        let mut interrupted = Vec::new();
+        for r in rows {
+            interrupted.push(r?);
+        }
+        drop(stmt);
+        if interrupted.is_empty() {
+            return Ok(interrupted);
+        }
+        let updated = conn.execute(
+            "UPDATE share_sync_runs
+             SET status = ?1,
+                 finished_at = ?2,
+                 error = ?3
+             WHERE status = ?4",
+            params![
+                RunStatus::Interrupted.as_str(),
+                now,
+                "interrupted_on_restart",
+                RunStatus::Running.as_str(),
+            ],
+        )?;
+        info!(
+            "share_sync 启动自愈: 收编 {} 条中断 run,将自动重跑",
+            updated
+        );
+        Ok(interrupted)
+    }
+
     ///
     /// `reason` 是 v1 新增字段，用于说明"为什么这条 item 没被真正执行"——
     /// 当前主要给 quota / local_disk_full 早停场景用，记录"skip_due_to_quota_full"
@@ -1264,6 +1320,43 @@ mod tests {
         assert_eq!(rec.error.as_deref(), Some("stale_run_killed_on_startup"));
         let fresh = mgr.get_run("run-fresh").unwrap().unwrap();
         assert_eq!(fresh.status, "running");
+    }
+
+    /// mark_running_runs_interrupted — 把**所有** running run(不论新旧)标记为
+    /// interrupted(非 failed),已完成的 run 不动。供启动续跑用。
+    #[test]
+    fn test_mark_running_runs_interrupted() {
+        let (_dir, mgr) = fresh();
+        let s = sub("a");
+        mgr.upsert_subscription(&s).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        // 两条 running:一新一老,都应被收编(进程重启时都是孤儿)
+        mgr.start_run("run-old", &s.id, now - 3 * 3600).unwrap();
+        mgr.start_run("run-new", &s.id, now - 30).unwrap();
+        // 已完成的不动
+        mgr.start_run("run-done", &s.id, now - 100).unwrap();
+        mgr.finish_run(
+            "run-done",
+            now - 50,
+            RunStatus::Completed,
+            &DiffSummary::default(),
+            None,
+        )
+        .unwrap();
+
+        let mut got = mgr.mark_running_runs_interrupted().unwrap();
+        let mut ids: Vec<String> = got.drain(..).map(|r| r.run_id).collect();
+        ids.sort();
+        assert_eq!(ids, ["run-new", "run-old"], "所有 running 都应被收编");
+        assert_eq!(got.len(), 0);
+
+        for rid in ["run-old", "run-new"] {
+            let rec = mgr.get_run(rid).unwrap().unwrap();
+            assert_eq!(rec.status, "interrupted");
+            assert_eq!(rec.error.as_deref(), Some("interrupted_on_restart"));
+        }
+        // 已完成不受影响
+        assert_eq!(mgr.get_run("run-done").unwrap().unwrap().status, "completed");
     }
 
     /// v2: 老库已有 (run_id, path) 重复行时, init_tables 走 ensure_run_items_unique_index

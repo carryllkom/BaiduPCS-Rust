@@ -1093,7 +1093,8 @@ function describeRunStatus(s: string): string {
   return s === 'running' ? '运行中' :
     s === 'completed' ? '已完成' :
     s === 'completed_with_errors' ? '完成（部分失败）' :
-    s === 'failed' ? '失败' : s
+    s === 'failed' ? '失败' :
+    s === 'interrupted' ? '已中断（自动重跑）' : s
 }
 
 function runStatusType(s: string): 'success' | 'warning' | 'danger' | 'info' {
