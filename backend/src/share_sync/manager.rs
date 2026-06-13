@@ -328,7 +328,19 @@ impl ShareSyncManager {
             .ok_or_else(|| ShareSyncError::SubscriptionNotFound(id.into()))?;
         let owner_uid = sub.owner_uid;
         match self.resolver.transfer_manager(owner_uid).await {
-            Some(tm) => Ok(collect_share_sync_subtasks(&tm, id, owner_uid).await),
+            Some(tm) => {
+                // 这是「进行中子任务」轮询兜底接口：必须只返回**未到终态**的子任务。
+                // 文件夹下载任务带 backup_config_id 归属后会**持久保留**(完成也不删),
+                // 若不过滤,切换页面后重新拉取会把已完成的文件夹当成「进行中」显示
+                // (前端 REST 路径直接信任后端,不像 WS upsert 那样剔除终态)。
+                // 与前端 SUBTASK_TERMINAL 口径一致,在源头过滤掉终态子任务。
+                let subs = collect_share_sync_subtasks(&tm, id, owner_uid)
+                    .await
+                    .into_iter()
+                    .filter(|s| !is_terminal_subtask_status(&s.status))
+                    .collect();
+                Ok(subs)
+            }
             None => Ok(Vec::new()),
         }
     }
@@ -1107,6 +1119,21 @@ pub async fn collect_share_sync_subtasks(
     }
 
     out
+}
+
+/// 子任务状态是否已到终态（完成/失败/取消）。
+///
+/// 口径覆盖三个来源的状态枚举(lowercased `{:?}`):
+/// - 文件/文件夹下载(`TaskStatus`/`FolderStatus`): `completed` / `failed` / `cancelled`
+/// - 内部转存(`TransferStatus`): `completed` / `transferfailed` / `downloadfailed`
+///
+/// 与前端 `SUBTASK_TERMINAL`(completed/failed/cancelled/success) 对齐,额外纳入
+/// 转存段特有的失败态,确保「进行中子任务」轮询接口不会回包任何已结束的子任务。
+fn is_terminal_subtask_status(status: &str) -> bool {
+    matches!(
+        status,
+        "completed" | "success" | "failed" | "cancelled" | "transferfailed" | "downloadfailed"
+    )
 }
 
 /// 收集当前子任务并逐个推送 `ShareSyncEvent::ItemProgress`（一帧）。
@@ -2092,6 +2119,33 @@ mod tests {
             download_conflict_strategy_for_share_sync(ConflictStrategy::Skip),
             DownloadConflictStrategy::Skip
         );
+    }
+
+    #[test]
+    fn test_is_terminal_subtask_status() {
+        // 终态：完成/成功/各类失败/取消 → 不应出现在「进行中子任务」
+        for s in [
+            "completed",
+            "success",
+            "failed",
+            "cancelled",
+            "transferfailed",
+            "downloadfailed",
+        ] {
+            assert!(is_terminal_subtask_status(s), "{s} 应判终态");
+        }
+        // 非终态：仍在进行 → 保留
+        for s in [
+            "pending",
+            "scanning",
+            "downloading",
+            "transferring",
+            "transferred",
+            "waiting_transfer",
+            "paused",
+        ] {
+            assert!(!is_terminal_subtask_status(s), "{s} 不应判终态");
+        }
     }
 
     #[test]

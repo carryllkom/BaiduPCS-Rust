@@ -1320,9 +1320,12 @@ function upsertSubtask(sid: string, st: ShareSyncSubtask) {
 async function loadSubtasksFor(id: string) {
   try {
     const list = await listSubtasks(id)
+    // 防御：只展示未到终态的子任务。后端「进行中」接口已过滤终态，这里再兜一层，
+    // 与 WS upsertSubtask 的剔除口径一致，避免切换页面后已完成的文件夹被当成进行中。
+    const active = list.filter(st => !SUBTASK_TERMINAL.has(st.status))
     const next = new Map(activeSubtasks.value)
-    if (list.length > 0) {
-      next.set(id, list)
+    if (active.length > 0) {
+      next.set(id, active)
     } else {
       next.delete(id)
     }
