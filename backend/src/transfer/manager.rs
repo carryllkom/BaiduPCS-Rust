@@ -248,6 +248,11 @@ impl TransferManager {
         self.download_manager.read().await.clone()
     }
 
+    /// 取文件夹下载管理器句柄（供分享同步收集 tree 模式产生的文件夹子任务进度）
+    pub async fn folder_download_manager_handle(&self) -> Option<Arc<FolderDownloadManager>> {
+        self.folder_download_manager.read().await.clone()
+    }
+
     /// 设置文件夹下载管理器（用于自动下载文件夹）
     pub async fn set_folder_download_manager(&self, fdm: Arc<FolderDownloadManager>) {
         let mut lock = self.folder_download_manager.write().await;
@@ -1970,7 +1975,17 @@ impl TransferManager {
                         }
                     }
                     match fdm
-                        .create_folder_download_with_dir(folder_path.clone(), &local_dir, None, None, owner_uid)
+                        // 🔥 分享同步内部任务：把 backup_config_id 透传给文件夹下载，
+                        // 使其从「下载管理」隐藏并归属为分享同步子任务（与单文件下载段
+                        // 走 create_backup_task 对齐）。
+                        .create_folder_download_with_dir_backup(
+                            folder_path.clone(),
+                            &local_dir,
+                            None,
+                            None,
+                            owner_uid,
+                            backup_config_id.clone(),
+                        )
                         .await
                     {
                         Ok(folder_id) => {
@@ -3822,6 +3837,16 @@ impl TransferManager {
             info!(
                 "delete_tasks_for_backup_config: cfg={} 下载子任务清理（内存={}, 历史={}）",
                 cfg_id, dl_mem, dl_hist
+            );
+        }
+
+        // 4) 连带清理 tree 模式整目录下载产生的内部隐藏文件夹下载任务
+        //    （同样带 backup_config_id = share-sync:{id}）。
+        if let Some(fdm) = self.folder_download_manager_handle().await {
+            let folder_count = fdm.delete_folders_for_backup_config(cfg_id).await;
+            info!(
+                "delete_tasks_for_backup_config: cfg={} 文件夹子任务清理（{} 个）",
+                cfg_id, folder_count
             );
         }
 
