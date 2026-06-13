@@ -3819,6 +3819,14 @@ impl TransferManager {
         // 恢复分享根路径，避免恢复后退化到启发式推导
         task.share_root_path = recovery_info.share_root_path.clone();
 
+        // 还原任务归属与内部标记：带 share-sync: 前缀的是分享同步内部转存任务，
+        // 必须恢复 is_internal，否则重启后会漏进「转存管理」列表（与运行期隔离不一致）。
+        task.backup_config_id = recovery_info.backup_config_id.clone();
+        task.is_internal = recovery_info
+            .backup_config_id
+            .as_deref()
+            .is_some_and(|c| c.starts_with("share-sync:"));
+
         // 恢复文件列表
         if let Some(ref json) = recovery_info.file_list_json {
             if let Ok(file_list) = serde_json::from_str::<Vec<SharedFileInfo>>(json) {
