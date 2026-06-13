@@ -6225,6 +6225,57 @@ impl DownloadManager {
         (memory_count, history_count)
     }
 
+    /// 删除归属某 `backup_config_id`（如 `share-sync:{订阅id}`）的全部下载任务
+    /// （内存 + 历史）。用于删除分享同步订阅时清掉内部下载子任务,避免孤儿脏数据。
+    /// 返回 `(内存数, 历史数)`。下载文件本身保留（`delete_files=false`）。
+    pub async fn delete_tasks_for_backup_config(&self, cfg_id: &str) -> (usize, usize) {
+        // 1) 收集内存中归属该 cfg_id 的任务 ID。
+        let target_ids: Vec<String> = {
+            let tasks = self.tasks.read().await;
+            let mut ids = Vec::new();
+            for (id, task) in tasks.iter() {
+                let t = task.lock().await;
+                if t.backup_config_id.as_deref() == Some(cfg_id) {
+                    ids.push(id.clone());
+                }
+            }
+            ids
+        };
+
+        let memory_count = target_ids.len();
+        if !target_ids.is_empty() {
+            let (success, failed) = self.batch_delete_tasks(&target_ids, false).await;
+            info!(
+                "delete_tasks_for_backup_config: cfg={} batch_delete 完成: 成功={}, 失败={}",
+                cfg_id, success, failed
+            );
+        }
+
+        // 2) 历史数据库：按 backup_config_id 删除历史。
+        let mut history_count = 0;
+        if let Some(ref pm) = self.persistence_manager {
+            let pm_guard = pm.lock().await;
+            let history_db = pm_guard.history_db().cloned();
+            drop(pm_guard);
+
+            if let Some(db) = history_db {
+                match db.remove_tasks_by_backup_config(cfg_id) {
+                    Ok(count) => history_count += count,
+                    Err(e) => warn!(
+                        "delete_tasks_for_backup_config: 删除历史下载任务（cfg={}）失败: {}",
+                        cfg_id, e
+                    ),
+                }
+            }
+        }
+
+        info!(
+            "delete_tasks_for_backup_config: cfg={} 完成（内存={}, 历史={}）",
+            cfg_id, memory_count, history_count
+        );
+        (memory_count, history_count)
+    }
+
     /// 获取下载目录
     pub async fn download_dir(&self) -> PathBuf {
         self.download_dir.read().await.clone()

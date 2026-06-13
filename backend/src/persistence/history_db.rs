@@ -1010,6 +1010,30 @@ impl HistoryDbManager {
         Ok(deleted)
     }
 
+    /// 按 backup_config_id 删除任务历史
+    ///
+    /// 用于删除分享同步订阅时,清掉其名下 `share-sync:{订阅id}` 归属的内部转存/下载
+    /// 历史记录,避免订阅删除后留下孤儿脏数据。
+    pub fn remove_tasks_by_backup_config(&self, backup_config_id: &str) -> Result<usize> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("获取数据库锁失败: {}", e))?;
+
+        let deleted = conn.execute(
+            "DELETE FROM task_history WHERE backup_config_id = ?1",
+            params![backup_config_id],
+        )?;
+
+        if deleted > 0 {
+            info!(
+                "已从历史数据库删除归属 {} 的 {} 个任务",
+                backup_config_id, deleted
+            );
+        }
+        Ok(deleted)
+    }
+
     /// 清理过期的任务历史
     pub fn cleanup_expired_task_history(&self, retention_days: u64) -> Result<usize> {
         let conn = self
