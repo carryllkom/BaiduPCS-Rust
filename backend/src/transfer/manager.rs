@@ -3759,6 +3759,79 @@ impl TransferManager {
         (memory_count, history_count)
     }
 
+    /// 删除归属某 `backup_config_id`（如 `share-sync:{订阅id}`）的全部转存任务
+    /// （内存运行中 + 历史），并连带清理其名下的下载子任务。
+    ///
+    /// 用于删除分享同步订阅时清掉内部转存/下载任务，避免订阅删除后残留孤儿脏数据。
+    /// 返回 `(转存内存数, 转存历史数)`。
+    pub async fn delete_tasks_for_backup_config(&self, cfg_id: &str) -> (usize, usize) {
+        // 1) 收集内存中归属该 cfg_id 的 task ids（先克隆 Arc，再按 .await 顺序取读锁，
+        //    避免 cross-await 持有 DashMap 锁）。
+        let task_arcs: Vec<(String, Arc<RwLock<TransferTask>>)> = self
+            .tasks
+            .iter()
+            .map(|e| (e.key().clone(), e.value().task.clone()))
+            .collect();
+
+        let mut target_ids: Vec<String> = Vec::new();
+        for (id, task_arc) in task_arcs {
+            let task = task_arc.read().await;
+            if task.backup_config_id.as_deref() == Some(cfg_id) {
+                target_ids.push(id);
+            }
+        }
+
+        let memory_count = target_ids.len();
+        for id in target_ids {
+            if let Err(e) = self.remove_task(&id).await {
+                warn!(
+                    "delete_tasks_for_backup_config: 删除转存任务 {} 失败: {}",
+                    id, e
+                );
+            }
+        }
+
+        // 2) 历史数据库：删除该 backup_config_id 的全部转存历史。
+        let mut history_count = 0;
+        if let Some(pm_arc) = self
+            .persistence_manager
+            .lock()
+            .await
+            .as_ref()
+            .map(|pm| pm.clone())
+        {
+            let pm_guard = pm_arc.lock().await;
+            let history_db = pm_guard.history_db().cloned();
+            drop(pm_guard);
+
+            if let Some(db) = history_db {
+                match db.remove_tasks_by_backup_config(cfg_id) {
+                    Ok(count) => history_count = count,
+                    Err(e) => warn!(
+                        "delete_tasks_for_backup_config: 删除历史任务（cfg={}）失败: {}",
+                        cfg_id, e
+                    ),
+                }
+            }
+        }
+
+        // 3) 连带清理下载子任务（分享同步「转存并下载/分享直下」会建下载任务，
+        //    同样带 backup_config_id = share-sync:{id}）。
+        if let Some(dm) = self.download_manager_handle().await {
+            let (dl_mem, dl_hist) = dm.delete_tasks_for_backup_config(cfg_id).await;
+            info!(
+                "delete_tasks_for_backup_config: cfg={} 下载子任务清理（内存={}, 历史={}）",
+                cfg_id, dl_mem, dl_hist
+            );
+        }
+
+        info!(
+            "delete_tasks_for_backup_config: cfg={} 完成（转存内存={}, 转存历史={}）",
+            cfg_id, memory_count, history_count
+        );
+        (memory_count, history_count)
+    }
+
     /// 获取配置
     pub async fn get_config(&self) -> TransferConfig {
         self.config.read().await.clone()

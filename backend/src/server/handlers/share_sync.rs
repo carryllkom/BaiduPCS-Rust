@@ -215,7 +215,7 @@ pub async fn delete_subscription(
 ) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
     let m = get_manager(&state).await?;
     require_subscription(&m, &id)?;
-    m.delete_subscription(&id).map_err(map_share_err)?;
+    m.delete_subscription(&id).await.map_err(map_share_err)?;
     Ok(Json(ApiResponse::success(
         serde_json::json!({"deleted": id}),
     )))

@@ -411,7 +411,7 @@ impl ShareSyncManager {
         Ok(())
     }
 
-    pub fn delete_subscription(self: &Arc<Self>, id: &str) -> Result<(), ShareSyncError> {
+    pub async fn delete_subscription(self: &Arc<Self>, id: &str) -> Result<(), ShareSyncError> {
         let removed = match self.subscriptions.remove(id) {
             Some((_, sub)) => sub,
             None => return Err(ShareSyncError::SubscriptionNotFound(id.into())),
@@ -419,6 +419,19 @@ impl ShareSyncManager {
         self.stop_scheduler_for(id);
         // DB 删除（级联清理 snapshots/runs）
         let _ = self.persistence.delete_subscription(id);
+        // 清理该订阅名下的内部转存/下载任务（带 share-sync:{id} 归属），
+        // 否则删订阅后这些任务会成为孤儿（重启被恢复成永远跑不完的隐藏任务 → 脏数据）。
+        // 转存管理器会连带清理它持有的下载子任务。
+        let cfg_id = share_sync_backup_config_id(id);
+        if let Some(transfer) = self.resolver.transfer_manager(removed.owner_uid).await {
+            let (mem, hist) = transfer.delete_tasks_for_backup_config(&cfg_id).await;
+            if mem > 0 || hist > 0 {
+                info!(
+                    "share-sync: 删除订阅 {} 已清理内部转存任务（内存={}, 历史={}）",
+                    id, mem, hist
+                );
+            }
+        }
         self.publisher.publish(ShareSyncEvent::SubscriptionDeleted {
             subscription_id: id.into(),
             owner_uid: removed.owner_uid,
@@ -1801,7 +1814,7 @@ mod tests {
         let json_path = dir.path().join("subs.json");
         assert!(!json_path.exists());
 
-        m.delete_subscription(&s.id).unwrap();
+        m.delete_subscription(&s.id).await.unwrap();
         assert_eq!(m.list_subscriptions().len(), 0);
     }
 
