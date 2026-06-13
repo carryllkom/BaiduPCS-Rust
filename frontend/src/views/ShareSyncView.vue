@@ -44,6 +44,13 @@
                   <span class="config-name">{{ s.name }}</span>
                   <AccountBadge :owner-uid="s.owner_uid" size="small" class="task-account-badge" />
                   <el-tag :type="s.enabled ? 'success' : 'info'" size="small">{{ s.enabled ? '已启用' : '已停用' }}</el-tag>
+                  <el-tooltip
+                    v-if="s.link_invalid"
+                    :content="s.link_invalid_reason || '分享链接已失效（被取消/过期/提取码失效），已暂停轮询；更新链接后点「恢复」'"
+                    placement="top"
+                  >
+                    <el-tag type="danger" size="small" effect="dark">链接失效·已暂停</el-tag>
+                  </el-tooltip>
                   <el-tag :type="strategyTagType(s.conflict_strategy)" size="small">{{ describeStrategy(s.conflict_strategy) }}</el-tag>
                 </div>
                 <div class="config-path">
@@ -82,6 +89,16 @@
                     </el-button>
                   </span>
                 </el-tooltip>
+                <el-button
+                  v-if="s.link_invalid"
+                  size="small"
+                  type="primary"
+                  :icon="RefreshRight"
+                  :loading="resumingId === s.id"
+                  @click="resumeNow(s)"
+                >
+                  我已更新链接，恢复
+                </el-button>
                 <el-button size="small" :icon="Edit" @click="openEdit(s)">编辑</el-button>
                 <el-button
                   size="small"
@@ -405,7 +422,7 @@ import ShareIncludeExcludeEditor from '@/components/ShareIncludeExcludeEditor.vu
 import { FilePickerModal } from '@/components/FilePicker'
 import { getConfig, updateRecentDirDebounced, setDefaultDownloadDir, type DownloadConfig } from '@/api/config'
 import {
-  Plus, Edit, Delete, Refresh, Link,
+  Plus, Edit, Delete, Refresh, RefreshRight, Link,
   FolderOpened, VideoPause, VideoPlay, Loading, Clock, ArrowDown, ArrowRight,
 } from '@element-plus/icons-vue'
 import {
@@ -421,7 +438,7 @@ import {
   type ShareSyncWsEvent,
   type ShareSyncSubtask,
   listSubscriptions, updateSubscription,
-  deleteSubscription, setSubscriptionEnabled, triggerSubscription, listRuns, getRun, listSubtasks,
+  deleteSubscription, setSubscriptionEnabled, triggerSubscription, resumeSubscription, listRuns, getRun, listSubtasks,
 } from '@/api/shareSync'
 import { getWebSocketClient, connectWebSocket, type ConnectionState } from '@/utils/websocket'
 import { createAdaptivePoller } from '@/utils/backendHealth'
@@ -504,6 +521,7 @@ const runsDialogVisible = ref(false)
 const detailDialogVisible = ref(false)
 const saving = ref(false)
 const triggeringId = ref<string | null>(null)
+const resumingId = ref<string | null>(null)
 const formRef = ref()
 const scheduledTime = ref<string>('03:00')
 
@@ -978,6 +996,21 @@ async function toggleEnabled(s?: ShareSubscription) {
     await refresh()
   } catch (e) {
     ElMessage.error(`操作失败: ${getApiErrorMessage(e)}`)
+  }
+}
+
+async function resumeNow(s?: ShareSubscription) {
+  const target = s ?? selected.value
+  if (!target) return
+  resumingId.value = target.id
+  try {
+    await resumeSubscription(target.id)
+    ElMessage.success('已恢复轮询并立即重试一次')
+    await refresh()
+  } catch (e) {
+    ElMessage.error(`恢复失败: ${getApiErrorMessage(e)}`)
+  } finally {
+    resumingId.value = null
   }
 }
 

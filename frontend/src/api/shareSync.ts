@@ -54,6 +54,12 @@ export interface ShareSubscription {
   delete_missing: boolean
   poll_config: PollConfig
   enabled: boolean
+  /** 连续「链接确定性失效」失败次数（达阈值后自动暂停） */
+  consecutive_link_failures?: number
+  /** 链接已确定性失效并被自动暂停轮询，等用户更新链接后「恢复」 */
+  link_invalid?: boolean
+  /** 链接失效的可读原因 */
+  link_invalid_reason?: string | null
   created_at: string
   updated_at: string
   /** 订阅所属账号 uid；前端据此渲染账号徽章 / 按账号过滤 */
@@ -237,6 +243,11 @@ export async function setSubscriptionEnabled(id: string, enabled: boolean): Prom
 
 export async function triggerSubscription(id: string): Promise<void> {
   await rawApiClient.post(`${BASE}/subscriptions/${id}/trigger`)
+}
+
+/** 「我已更新链接，恢复」：清除链接失效标记，恢复轮询并立即重试一次 */
+export async function resumeSubscription(id: string): Promise<void> {
+  await rawApiClient.post(`${BASE}/subscriptions/${id}/resume`)
 }
 
 export async function listRuns(id: string, page = 1, pageSize = 20): Promise<RunRecord[]> {

@@ -247,6 +247,21 @@ pub async fn disable_subscription(
     )))
 }
 
+/// POST /api/v1/share-sync/subscriptions/:id/resume
+///
+/// 「我已更新链接，恢复」：清除链接失效标记 + 连续失效计数，恢复轮询并立即重试一次。
+pub async fn resume_subscription(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
+    let m = get_manager(&state).await?;
+    require_subscription(&m, &id)?;
+    m.resume_link_invalid(&id).map_err(map_share_err)?;
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"subscription_id": id, "resumed": true}),
+    )))
+}
+
 /// POST /api/v1/share-sync/subscriptions/:id/trigger
 pub async fn trigger_subscription(
     State(state): State<AppState>,

@@ -447,6 +447,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/share-sync/subscriptions/:id/enable", post(handlers::enable_subscription))
         .route("/share-sync/subscriptions/:id/disable", post(handlers::disable_subscription))
         .route("/share-sync/subscriptions/:id/trigger", post(handlers::trigger_subscription))
+        .route("/share-sync/subscriptions/:id/resume", post(handlers::resume_subscription))
         .route("/share-sync/subscriptions/:id/runs", get(handlers::list_runs))
         .route("/share-sync/subscriptions/:id/subtasks", get(handlers::list_subtasks))
         .route("/share-sync/runs/:id", get(handlers::get_run))

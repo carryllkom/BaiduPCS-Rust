@@ -214,6 +214,21 @@ impl ShareSyncError {
         matches!(self.category(), ErrorCategory::Transient)
     }
 
+    /// 是否属于「分享链接确定性失效」——分享被取消/过期、提取码失效等,重试也救不回来,
+    /// 应计入连续失效计数并在达阈值后自动暂停轮询。
+    ///
+    /// 注意:风控(errno=132)虽然也走 `Auth` 分类,但它是账号被临时标记、会自行恢复,
+    /// **不算**确定性失效;临时网络问题(被包成 `ShareLinkError` 文案里含超时关键字)也排除,
+    /// 避免抖动误判停用。
+    pub fn is_link_invalid(&self) -> bool {
+        match self {
+            // 访问分享页 / 验证提取码失败都会包成 ShareLinkError;排除临时网络抖动。
+            ShareSyncError::ShareLinkError(msg) => !matches_any(msg, TRANSIENT_KEYWORDS),
+            // 资源不存在 / 已失效
+            other => matches!(other.category(), ErrorCategory::NotFound),
+        }
+    }
+
     /// 是否触发"目录二分递归"(阶段 4 新增)
     ///
     /// 这三类失败有一个共同点:**重试同一组没用,但拆小可能成功**:
