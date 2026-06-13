@@ -51,8 +51,12 @@
           <div v-if="passwordError" class="error-tip">{{ passwordError }}</div>
         </el-form-item>
 
-        <!-- 保存位置 -->
-        <el-form-item label="保存到" prop="savePath">
+        <!-- 保存位置（开启“保持同步”且关闭“转存到网盘”时隐藏，仅本地/分享直下订阅无需网盘目录） -->
+        <el-form-item
+            v-if="!form.keepSync || form.syncToNetdisk"
+            label="保存到"
+            prop="savePath"
+        >
           <NetdiskPathSelector
               v-model="form.savePath"
               v-model:fs-id="form.saveFsId"
@@ -100,9 +104,13 @@
                 v-model:exclude-patterns="form.excludePatterns"
             />
           </el-form-item>
+          <el-form-item label="转存到网盘">
+            <el-switch v-model="form.syncToNetdisk" />
+            <span class="switch-tip">把分享内容转存到上方“保存到”的网盘目录</span>
+          </el-form-item>
           <el-form-item label="同步到本地">
             <el-switch v-model="form.syncToLocal" />
-            <span class="switch-tip">同时把分享内容同步到本地目录（与上方网盘目标并存）</span>
+            <span class="switch-tip">把分享内容下载到本地目录</span>
           </el-form-item>
           <el-form-item v-if="form.syncToLocal" label="本地目录">
             <div class="local-target-row">
@@ -118,7 +126,7 @@
           </el-form-item>
           <div class="sync-hint">
             不选同步路径＝订阅<strong>整个分享</strong>；选中目录＝该子树（含未来新增）同步，选中文件＝只同步该文件。
-            网盘目标为上方“保存到”的目录；可额外勾选“同步到本地”添加一个本地目标。更多高级项可创建后在「分享同步」页编辑。
+            「转存到网盘」「同步到本地」<strong>至少开一个</strong>：只开网盘＝转存到网盘；只开本地＝分享直下到本地；都开＝转存一次后从网盘副本下载。更多高级项可创建后在「分享同步」页编辑。
           </div>
         </template>
       </el-form>
@@ -293,7 +301,8 @@ const form = reactive({
   syncIntervalSecs: 1800,
   includePaths: [] as string[],
   excludePatterns: [] as string[],
-  // 创建订阅时可选的本地同步目标
+  // 订阅目标开关（至少开一个）：转存到网盘 / 同步到本地
+  syncToNetdisk: true,
   syncToLocal: false,
   syncLocalPath: '',
 })
@@ -350,7 +359,21 @@ const rules: FormRules = {
     }
   ],
   savePath: [
-    { required: true, message: '请选择保存位置', trigger: 'change' }
+    {
+      validator: (_, value, callback) => {
+        // 仅本地/分享直下订阅（保持同步且关闭转存到网盘）无需网盘目录
+        if (form.keepSync && !form.syncToNetdisk) {
+          callback()
+          return
+        }
+        if (!value || !String(value).trim()) {
+          callback(new Error('请选择保存位置'))
+          return
+        }
+        callback()
+      },
+      trigger: 'change'
+    }
   ],
   syncName: [
     {
@@ -427,6 +450,7 @@ function handleClose() {
   form.syncIntervalSecs = 1800
   form.includePaths = []
   form.excludePatterns = []
+  form.syncToNetdisk = true
   form.syncToLocal = false
   form.syncLocalPath = ''
   errorMessage.value = ''
@@ -545,6 +569,10 @@ async function createSyncSubscription() {
   const interval = Number(form.syncIntervalSecs)
   if (!Number.isFinite(interval) || interval < 600) {
     ElMessage.error('轮询间隔不能小于 600 秒')
+    return
+  }
+  if (!form.syncToNetdisk && !form.syncToLocal) {
+    ElMessage.error('请至少开启“转存到网盘”或“同步到本地”其中一个')
     return
   }
   if (form.syncToLocal && !form.syncLocalPath.trim()) {
@@ -684,16 +712,22 @@ function handleSyncLocalUseDefault() {
   ).trim()
 }
 
-// 构造订阅目标：网盘目标（上方“保存到”）+ 可选本地目标
+// 构造订阅目标：按“转存到网盘/同步到本地”两个开关推导
+//   仅网盘     = 仅 Netdisk target
+//   网盘+本地  = Netdisk + Local{ mode: transfer_and_download }（后端合并成一条腿：转存一次→从副本下载）
+//   仅本地     = 仅 Local{ mode: share_direct }（分享直下：转临时目录→下载→清理）
 function buildSyncTargets(): SyncTarget[] {
-  const targets: SyncTarget[] = [
-    { kind: 'netdisk', remote_path: form.savePath, save_fs_id: form.saveFsId },
-  ]
+  const targets: SyncTarget[] = []
+  if (form.syncToNetdisk) {
+    targets.push({ kind: 'netdisk', remote_path: form.savePath, save_fs_id: form.saveFsId })
+  }
   if (form.syncToLocal) {
-    // 转存对话框的网盘目标即「保存到」目录并保留，本地段从该保留目录下载
-    // → 对应「转存并下载」(transfer_and_download)。分享直下(临时目录+清理)的一次性
-    //   场景由独立入口处理，订阅创建后可在「分享同步」页改为其它模式。
-    targets.push({ kind: 'local', local_path: form.syncLocalPath.trim(), mode: 'transfer_and_download' })
+    // 有网盘目标＝转存并下载（复用网盘副本）；无＝分享直下。后端最终按目标存在性推导，这里保持一致。
+    targets.push({
+      kind: 'local',
+      local_path: form.syncLocalPath.trim(),
+      mode: form.syncToNetdisk ? 'transfer_and_download' : 'share_direct',
+    })
   }
   return targets
 }
