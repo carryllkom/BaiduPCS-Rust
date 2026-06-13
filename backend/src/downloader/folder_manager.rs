@@ -2059,7 +2059,33 @@ impl FolderDownloadManager {
             }
 
             // 获取文件列表
-            let file_list = client.get_file_list(current_path, page, page_size).await?;
+            //
+            // 🔥 刚转存到网盘的目录可能因百度侧最终一致性尚未就绪而短暂返回
+            // `API error -9`（文件不存在）等瞬时错误（分享同步 tree 模式整目录转存后
+            // 立即自动下载会撞上）。直接 `?` 会让整个文件夹下载判失败、子文件全标
+            // 「下载失败」。这里对扫描列表做有界重试（最多 4 次，递增 backoff），
+            // 真失败仍会在重试耗尽后向上抛出。
+            let file_list = {
+                const SCAN_LIST_MAX_ATTEMPTS: u32 = 4;
+                let mut attempt = 0u32;
+                loop {
+                    match client.get_file_list(current_path, page, page_size).await {
+                        Ok(list) => break list,
+                        Err(e) => {
+                            attempt += 1;
+                            if attempt >= SCAN_LIST_MAX_ATTEMPTS || cancel_token.is_cancelled() {
+                                return Err(e);
+                            }
+                            let backoff = tokio::time::Duration::from_millis(800 * attempt as u64);
+                            warn!(
+                                "扫描文件夹列表失败(第 {}/{} 次), {:?} 后重试: dir={}, page={}, err={}",
+                                attempt, SCAN_LIST_MAX_ATTEMPTS, backoff, current_path, page, e
+                            );
+                            tokio::time::sleep(backoff).await;
+                        }
+                    }
+                }
+            };
 
             let mut batch_files = Vec::new();
             let mut batch_size = 0u64;

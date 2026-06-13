@@ -1229,11 +1229,30 @@ function clampPercent(p: number): number {
   return Math.min(100, Math.max(0, Math.round(p)))
 }
 
-// 下载段：已下载 / 总大小 · 速度；转存段：已完成 / 总文件数
+// 预计剩余时间（秒）格式化，与自动备份 `formatETA` 口径一致
+function formatEtaSeconds(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '--'
+  if (seconds < 60) return `${Math.ceil(seconds)} 秒`
+  if (seconds < 3600) {
+    const minutes = Math.floor(seconds / 60)
+    const secs = Math.ceil(seconds % 60)
+    return `${minutes} 分 ${secs} 秒`
+  }
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  return `${hours} 小时 ${minutes} 分`
+}
+
+// 下载段：已下载 / 总大小 · 速度 · 剩余预计；转存段：已完成 / 总文件数
 function subtaskStat(st: ShareSyncSubtask): string {
   if (st.kind === 'download') {
-    const sizePart = `${formatBytes(st.downloaded)} / ${formatBytes(st.total)}`
-    return st.speed > 0 ? `${sizePart} · ${formatSpeed(st.speed)}` : sizePart
+    let s = `${formatBytes(st.downloaded)} / ${formatBytes(st.total)}`
+    if (st.speed > 0) {
+      s += ` · ${formatSpeed(st.speed)}`
+      const eta = st.eta_seconds ?? (st.total > st.downloaded ? (st.total - st.downloaded) / st.speed : null)
+      if (eta != null && eta > 0) s += ` · 剩余 ${formatEtaSeconds(eta)}`
+    }
+    return s
   }
   return `${st.downloaded}/${st.total} 文件`
 }
@@ -1385,6 +1404,7 @@ onMounted(async () => {
         total: evt.total,
         progress: evt.progress,
         speed: evt.speed,
+        eta_seconds: evt.eta_seconds ?? null,
         owner_uid: evt.owner_uid ?? 0,
       })
       return
