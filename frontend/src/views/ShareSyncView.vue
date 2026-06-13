@@ -243,16 +243,13 @@
             <el-radio-button value="skip">跳过</el-radio-button>
           </el-radio-group>
         </el-form-item>
-        <el-form-item label="同步方式">
+        <el-form-item label="同步目标">
           <div class="sync-mode-editor">
-            <el-radio-group v-model="localSyncMode">
-              <el-radio-button value="netdisk_only">仅转存到网盘</el-radio-button>
-              <el-radio-button value="transfer_and_download">转存并下载</el-radio-button>
-              <el-radio-button value="share_direct">分享直下</el-radio-button>
-            </el-radio-group>
-            <div class="sync-mode-hint">{{ syncModeHint }}</div>
-
-            <div v-if="showNetdiskPath" class="mode-target-row">
+            <div class="sync-toggle-row">
+              <el-switch v-model="netdiskEnabled" />
+              <span class="sync-toggle-label">转存到网盘</span>
+            </div>
+            <div v-if="netdiskEnabled" class="mode-target-row">
               <span class="mode-target-label">网盘目录</span>
               <el-input
                 v-model="netdiskRemotePath"
@@ -260,7 +257,12 @@
                 style="flex: 1"
               />
             </div>
-            <div v-if="showLocalPath" class="mode-target-row">
+
+            <div class="sync-toggle-row">
+              <el-switch v-model="localEnabled" />
+              <span class="sync-toggle-label">下载到本地</span>
+            </div>
+            <div v-if="localEnabled" class="mode-target-row">
               <span class="mode-target-label">本地目录</span>
               <span
                 class="mode-target-value"
@@ -273,6 +275,8 @@
                 选择
               </el-button>
             </div>
+
+            <div class="sync-mode-hint">{{ syncModeHint }}</div>
           </div>
         </el-form-item>
         <el-form-item label="轮询">
@@ -416,7 +420,6 @@ import {
   type PollConfig,
   type ShareSyncWsEvent,
   type ShareSyncSubtask,
-  type LocalSyncMode,
   listSubscriptions, updateSubscription,
   deleteSubscription, setSubscriptionEnabled, triggerSubscription, listRuns, getRun, listSubtasks,
 } from '@/api/shareSync'
@@ -520,12 +523,13 @@ function targetKindCounts(): { netdisk: number; local: number } {
   return { netdisk, local }
 }
 
-// ==================== 本地同步三模式选择器 ====================
-// 三模式直接映射到目标组合（与后端 LocalSyncMode + validate 一致）：
-//   仅转存到网盘  = 仅 Netdisk target
-//   转存并下载    = Netdisk target + Local{ mode: transfer_and_download }（依赖网盘目录留存）
-//   分享直下      = 仅 Local{ mode: share_direct }（转存临时目录→下载→清理，网盘不留存）
-type SyncModeUi = 'netdisk_only' | 'transfer_and_download' | 'share_direct'
+// ==================== 同步目标开关 ====================
+// 不再让用户手选模式，改为「转存到网盘」「下载到本地」两个开关，行为由组合自动推导
+// （与后端 effective_transfer_ops 一致）：
+//   仅网盘        = 仅 Netdisk target
+//   网盘+本地     = Netdisk + Local{ mode: transfer_and_download }（后端合并成一条腿：转存一次→从副本下载）
+//   仅本地        = 仅 Local{ mode: share_direct }（分享直下：转临时目录→下载→清理，网盘不留存）
+// 约束：至少开启一个。
 
 function findNetdiskTarget(): NetdiskTarget | undefined {
   return form.value.targets.find((t): t is NetdiskTarget => t.kind === 'netdisk')
@@ -534,43 +538,45 @@ function findLocalTarget(): LocalTarget | undefined {
   return form.value.targets.find((t): t is LocalTarget => t.kind === 'local')
 }
 
-const localSyncMode = computed<SyncModeUi>({
-  get() {
-    const local = findLocalTarget()
-    if (!local) return 'netdisk_only'
-    return local.mode === 'transfer_and_download' ? 'transfer_and_download' : 'share_direct'
-  },
-  set(mode: SyncModeUi) {
-    // 切换模式时尽量保留已填的网盘/本地路径，避免误清空
-    const nd = findNetdiskTarget()
-    const lo = findLocalTarget()
-    const remotePath = nd?.remote_path ?? '/'
-    const saveFsId = nd?.save_fs_id ?? 0
-    const localPath = lo?.local_path ?? ''
-    const ndStrategy = nd?.conflict_strategy ?? null
-    const loStrategy = lo?.conflict_strategy ?? null
-    const mkNetdisk = (): NetdiskTarget => ({ kind: 'netdisk', remote_path: remotePath, save_fs_id: saveFsId, conflict_strategy: ndStrategy })
-    const mkLocal = (m: LocalSyncMode): LocalTarget => ({ kind: 'local', local_path: localPath, conflict_strategy: loStrategy, mode: m })
+// 按开关重建目标列表，尽量保留已填的网盘/本地路径，避免误清空
+function rebuildTargets(netdisk: boolean, local: boolean) {
+  if (!netdisk && !local) {
+    ElMessage.warning('至少需要开启一个同步目标（网盘或本地）')
+    return
+  }
+  const nd = findNetdiskTarget()
+  const lo = findLocalTarget()
+  const remotePath = nd?.remote_path ?? '/'
+  const saveFsId = nd?.save_fs_id ?? 0
+  const localPath = lo?.local_path ?? ''
+  const ndStrategy = nd?.conflict_strategy ?? null
+  const loStrategy = lo?.conflict_strategy ?? null
+  const next: SyncTarget[] = []
+  if (netdisk) {
+    next.push({ kind: 'netdisk', remote_path: remotePath, save_fs_id: saveFsId, conflict_strategy: ndStrategy })
+  }
+  if (local) {
+    // 有网盘目标=转存并下载（复用网盘副本）；无=分享直下。后端最终按目标存在性推导，这里保持一致。
+    next.push({ kind: 'local', local_path: localPath, conflict_strategy: loStrategy, mode: netdisk ? 'transfer_and_download' : 'share_direct' })
+  }
+  form.value.targets = next
+}
 
-    if (mode === 'netdisk_only') {
-      form.value.targets = [mkNetdisk()]
-    } else if (mode === 'transfer_and_download') {
-      form.value.targets = [mkNetdisk(), mkLocal('transfer_and_download')]
-    } else {
-      form.value.targets = [mkLocal('share_direct')]
-    }
-  },
+const netdiskEnabled = computed<boolean>({
+  get() { return !!findNetdiskTarget() },
+  set(on: boolean) { rebuildTargets(on, !!findLocalTarget()) },
+})
+const localEnabled = computed<boolean>({
+  get() { return !!findLocalTarget() },
+  set(on: boolean) { rebuildTargets(!!findNetdiskTarget(), on) },
 })
 
-const showNetdiskPath = computed(() => localSyncMode.value !== 'share_direct')
-const showLocalPath = computed(() => localSyncMode.value !== 'netdisk_only')
-
 const syncModeHint = computed(() => {
-  switch (localSyncMode.value) {
-    case 'netdisk_only': return '只把分享内容转存到指定网盘目录并保留，不下载到本地。'
-    case 'transfer_and_download': return '转存到网盘目录保留，再从该目录下载到本地（需填写网盘目录）。'
-    default: return '转存到临时目录后下载到本地，下载完成即清理，网盘不留存。'
-  }
+  const nd = netdiskEnabled.value
+  const lo = localEnabled.value
+  if (nd && lo) return '转存到网盘目录并保留，再从这份网盘副本下载到本地（只转存一次，不会重复转存）。'
+  if (nd) return '只把分享内容转存到指定网盘目录并保留，不下载到本地。'
+  return '分享直下：转存到临时目录后下载到本地，下载完成即清理，网盘不留存。'
 })
 
 const netdiskRemotePath = computed<string>({
@@ -1113,6 +1119,7 @@ const ACTION_LABELS: Record<string, string> = {
 const TARGET_LABELS: Record<string, string> = {
   netdisk: '网盘',
   local: '本地',
+  netdisk_and_local: '网盘+本地',
 }
 const ITEM_STATUS_LABELS: Record<string, string> = {
   pending: '等待',
