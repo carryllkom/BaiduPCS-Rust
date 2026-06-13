@@ -8,7 +8,7 @@ import { rawApiClient } from './client'
 
 export type ConflictStrategy = 'overwrite' | 'versioned' | 'skip'
 export type PollMode = 'disabled' | 'interval' | 'scheduled'
-export type TargetKind = 'netdisk' | 'local'
+export type TargetKind = 'netdisk' | 'local' | 'netdisk_and_local'
 
 /**
  * 本地同步模式（与后端 `LocalSyncMode` 对齐，serde snake_case）：
