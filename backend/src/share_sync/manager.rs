@@ -1055,6 +1055,25 @@ pub async fn collect_share_sync_subtasks(
         }
     }
 
+    // 下载段(文件夹):tree 模式整目录转存 + 自动下载会产生文件夹下载任务
+    // (backup_config_id==cfg)。其子文件任务带 group_id 不会单独出现在下载管理,
+    // 也不走 is_backup 的 get_tasks_by_backup_config,因此在此按文件夹级聚合进度。
+    if let Some(fdm) = transfer.folder_download_manager_handle().await {
+        for f in fdm.get_folders_by_backup_config(&cfg).await {
+            out.push(ShareSyncSubtask {
+                task_id: format!("folder:{}", f.id),
+                name: f.name.clone(),
+                kind: "download".to_string(),
+                status: format!("{:?}", f.status).to_lowercase(),
+                downloaded: f.downloaded_size,
+                total: f.total_size,
+                progress: f.progress(),
+                speed: 0,
+                owner_uid,
+            });
+        }
+    }
+
     out
 }
 

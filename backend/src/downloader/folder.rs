@@ -78,6 +78,15 @@ pub struct FolderDownload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_task_id: Option<String>,
 
+    /// 🔥 归属的备份配置 ID（`Some` 时为内部隐藏文件夹下载）
+    ///
+    /// 与单文件下载的 `DownloadTask::backup_config_id` 同义：分享同步在 tree
+    /// 模式下整目录转存 + 自动下载会产生文件夹下载任务，需要据此从「下载管理」
+    /// 隐藏并归属到 `share-sync:{订阅id}`，否则会泄漏进下载管理且无法作为分享
+    /// 同步子任务被收集。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_config_id: Option<String>,
+
     /// 🔥 多账号归属 UID
     ///
     /// 旧持久化数据反序列化时为默认值 `Uid(0)`，恢复链路按
@@ -176,6 +185,7 @@ impl FolderDownload {
             completed_at: None,
             error: None,
             transfer_task_id: None,
+            backup_config_id: None,
             owner_uid: crate::auth::types::Uid::default(),
             failure_reason: None,
             // 任务位借调机制字段初始化
