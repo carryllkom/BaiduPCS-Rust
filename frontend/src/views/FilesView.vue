@@ -1452,7 +1452,18 @@ async function handleBatchDelete() {
               await refreshFileList()
             } catch (error: any) {
               done()
-              ElMessage.error(error.message || '删除失败')
+              // errno=132：百度二次安全验证（多见于删除文件过多的大目录）
+              const isVerify = error?.code === 132 ||
+                (typeof error?.message === 'string' && error.message.includes('安全验证'))
+              if (isVerify) {
+                ElMessageBox.alert(
+                    `百度风控拦截：${error.message}。删除大目录（内含大量文件）会触发百度二次安全验证，请前往 pan.baidu.com 在浏览器中完成验证后再试。`,
+                    '删除被风控拦截',
+                    { type: 'warning' }
+                )
+              } else {
+                ElMessage.error(error.message || '删除失败')
+              }
             } finally {
               instance.confirmButtonLoading = false
             }

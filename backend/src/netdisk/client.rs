@@ -20,6 +20,12 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
+/// 分块删除时单次删除请求最多包含的文件数。
+///
+/// 删除大目录会按内部递归文件总数计费,超过阈值会触发百度二次安全验证(errno=132)。
+/// 这里取较保守的默认值以尽量避免触发;可用环境变量 `BAIDUPCS_DELETE_CHUNK_SIZE` 覆盖。
+const DELETE_CHUNK_SIZE: usize = 100;
+
 /// 百度网盘客户端
 #[derive(Debug, Clone)]
 pub struct NetdiskClient {
@@ -4014,6 +4020,142 @@ impl NetdiskClient {
                 ))
             }
         }
+    }
+
+    /// 分块删除：规避「目录内文件过多 → 一次性删除文件数超阈值」触发的
+    /// 百度二次安全验证（errno=132）。
+    ///
+    /// 策略:
+    /// 1. 先整批删除一次（小目录/少量文件可直接成功，避免多余的列目录请求）；
+    /// 2. 若命中 errno=132，则递归列出各目录,把所有叶子文件分批删除
+    ///    （每批 ≤ `BAIDUPCS_DELETE_CHUNK_SIZE`，默认 100），文件清空后再删空壳目录；
+    /// 3. 分块过程中若再次命中 132，说明账号已被风控标记,拆分也无济于事 ——
+    ///    立即返回该 132 响应,交由上层引导用户去网页端完成安全验证。
+    pub async fn delete_files_chunked(
+        &self,
+        paths: &[String],
+    ) -> Result<crate::netdisk::DeleteFilesResponse> {
+        use crate::netdisk::DeleteFilesResponse;
+
+        if paths.is_empty() {
+            return Ok(DeleteFilesResponse::success(0));
+        }
+
+        let chunk_size = std::env::var("BAIDUPCS_DELETE_CHUNK_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DELETE_CHUNK_SIZE);
+
+        // 第一步:整批删除一次。
+        match self.delete_files(paths).await {
+            Ok(r) if r.success => return Ok(r),
+            Ok(r) if r.errno == Some(132) => {
+                info!(
+                    "删除命中 errno=132(二次验证),改为分块删除规避: {} 个顶层路径, chunk_size={}",
+                    paths.len(),
+                    chunk_size
+                );
+            }
+            Ok(r) => return Ok(r), // 其它失败原样返回
+            Err(e) => return Err(e),
+        }
+
+        // 第二步:枚举所有叶子文件 + 顶层目录/文件。
+        let mut leaf_files: Vec<String> = Vec::new();
+        let mut container_dirs: Vec<String> = Vec::new();
+        let mut direct_files: Vec<String> = Vec::new();
+        for p in paths {
+            let mut stack: Vec<String> = vec![p.clone()];
+            let mut is_dir_tree = false;
+            while let Some(d) = stack.pop() {
+                match self.try_list_all_children(&d).await? {
+                    Some(children) => {
+                        if &d == p {
+                            is_dir_tree = true;
+                        }
+                        for item in children {
+                            if item.isdir == 1 {
+                                stack.push(item.path);
+                            } else {
+                                leaf_files.push(item.path);
+                            }
+                        }
+                    }
+                    None => {
+                        if &d == p {
+                            direct_files.push(p.clone());
+                        }
+                    }
+                }
+            }
+            if is_dir_tree {
+                container_dirs.push(p.clone());
+            }
+        }
+
+        info!(
+            "分块删除枚举完成: {} 个叶子文件, {} 个顶层文件, {} 个顶层目录",
+            leaf_files.len(),
+            direct_files.len(),
+            container_dirs.len()
+        );
+
+        // 第三步:分批删除。叶子文件 → 顶层文件 → 清空后的顶层目录。
+        let mut deleted = 0usize;
+        // 顶层目录留到最后删(此时内部文件已清空,删整目录只计 0 个文件,不再触发阈值)。
+        let batches: Vec<&[String]> = leaf_files
+            .chunks(chunk_size)
+            .chain(direct_files.chunks(chunk_size))
+            .chain(container_dirs.chunks(chunk_size))
+            .collect();
+        for (i, batch) in batches.iter().enumerate() {
+            let r = self.delete_files(batch).await?;
+            if r.success {
+                deleted += batch.len();
+            } else if r.errno == Some(132) {
+                // 拆分后仍被风控:账号已被标记,直接上报让用户去验证。
+                warn!("分块删除第 {} 批仍命中 errno=132,账号疑似被风控标记,交由上层引导验证", i + 1);
+                return Ok(r);
+            } else {
+                return Ok(r);
+            }
+            // 批次之间轻微节流,降低被频率风控的概率。
+            if i + 1 < batches.len() {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
+        }
+
+        Ok(DeleteFilesResponse::success(deleted))
+    }
+
+    /// 列出某目录下的全部子项(自动翻页)。若该路径不是目录(列表接口返回非 0 errno),返回 `None`。
+    async fn try_list_all_children(
+        &self,
+        dir: &str,
+    ) -> Result<Option<Vec<crate::netdisk::FileItem>>> {
+        const PAGE_SIZE: u32 = 1000;
+        let mut page = 1u32;
+        let mut all: Vec<crate::netdisk::FileItem> = Vec::new();
+        loop {
+            let resp = self.get_file_list(dir, page, PAGE_SIZE).await?;
+            if resp.errno != 0 {
+                if page == 1 {
+                    return Ok(None); // 不是目录(或不可访问)
+                }
+                break; // 翻页中途出错:返回已收集到的部分
+            }
+            let n = resp.list.len() as u32;
+            all.extend(resp.list);
+            if n < PAGE_SIZE {
+                break;
+            }
+            page += 1;
+            if page > 100_000 {
+                break; // 安全上限
+            }
+        }
+        Ok(Some(all))
     }
 
     // =====================================================
