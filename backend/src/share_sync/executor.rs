@@ -1332,7 +1332,7 @@ impl<'a> ShareSyncExecutor<'a> {
                 .unwrap_or(1000);
 
         let mut attempt: u32 = 0;
-        let final_err: ShareSyncError = loop {
+        let mut final_err: ShareSyncError = loop {
             let submit_result: Result<String, ShareSyncError> = match target {
                 SyncTarget::Netdisk(t) => {
                     self.hooks
@@ -1423,6 +1423,83 @@ impl<'a> ShareSyncExecutor<'a> {
             }
             break attempt_err;
         };
+
+        // 「目标位置已存在同名」优雅继续（不判失败）:
+        // 网盘目标里已经有这份内容,所以不应整批判失败。
+        // - 网盘腿:目标已满足 → 直接把叶子标 Completed。
+        // - 本地腿:网盘副本已在(满足网盘目标),但本地副本仍缺 → 改走分享直下
+        //   (transfer_netdisk_dir=None ⇒ 临时目录→下载→清理),绕开网盘目标同名冲突,
+        //   把本地副本补齐;成功后标 Completed,失败则带新错误落到下方失败处理。
+        if final_err.is_already_exists() {
+            match target {
+                SyncTarget::Netdisk(_) => {
+                    info!(
+                        "share_sync_already_exists_netdisk: run_id={} depth={} first_path={} → 视为已转存,标记完成",
+                        run_id, depth, first_path
+                    );
+                    for leaf_idx in indices.iter().flat_map(|&i| tree.descendants_leaves(i)) {
+                        let leaf = tree.get(leaf_idx);
+                        let _ = self.persistence.add_run_item(
+                            run_id,
+                            &leaf.path,
+                            SyncAction::Added,
+                            target_kind,
+                            None,
+                            None,
+                            RunItemStatus::Completed,
+                            None,
+                            None,
+                        );
+                    }
+                    return Ok(());
+                }
+                SyncTarget::Local(t) => {
+                    info!(
+                        "share_sync_already_exists_local: run_id={} depth={} first_path={} → 网盘副本已在,改走分享直下补本地副本",
+                        run_id, depth, first_path
+                    );
+                    let direct_res = match self
+                        .hooks
+                        .submit_download_batch(&items_to_submit, &t.local_path, strategy, None)
+                        .await
+                    {
+                        Ok(task_id) => self
+                            .hooks
+                            .wait_transfer_task(&task_id, true, TASK_WAIT_TIMEOUT)
+                            .await
+                            .map(|()| task_id),
+                        Err(e) => Err(e),
+                    };
+                    match direct_res {
+                        Ok(task_id) => {
+                            for leaf_idx in indices.iter().flat_map(|&i| tree.descendants_leaves(i))
+                            {
+                                let leaf = tree.get(leaf_idx);
+                                let _ = self.persistence.add_run_item(
+                                    run_id,
+                                    &leaf.path,
+                                    SyncAction::Added,
+                                    target_kind,
+                                    Some(task_id.as_str()),
+                                    None,
+                                    RunItemStatus::Completed,
+                                    None,
+                                    None,
+                                );
+                            }
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            warn!(
+                                "share_sync_already_exists_local_fallback_failed: run_id={} depth={} first_path={} err={}",
+                                run_id, depth, first_path, e
+                            );
+                            final_err = e;
+                        }
+                    }
+                }
+            }
+        }
 
         // 失败处理:判断是否触发二分
         let category = final_err.category();
@@ -3076,6 +3153,115 @@ mod tests {
         assert_eq!(outcome.diff_summary.failed, 0);
         // 重试成功的那次 submit 被记录(失败那次在 take 后直接返回 Err,不入列)。
         assert_eq!(hooks.batch_transfers.lock().unwrap().len(), 1);
+        let items = pm.list_run_items(&outcome.run_id).unwrap();
+        assert!(!items.is_empty());
+        assert!(items.iter().all(|i| i.status == "completed"));
+    }
+
+    #[tokio::test]
+    async fn test_batch_already_exists_netdisk_marks_completed() {
+        // 纯网盘腿:整批转存撞「目标位置已存在同名文件」(errno=4 duplicated)时,
+        // 网盘里已经有这份内容 → 视为已转存,把叶子标 Completed,不判失败。
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().join("db");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let mut s = sub();
+        s.targets = vec![SyncTarget::Netdisk(NetdiskTarget {
+            remote_path: "/同步".into(),
+            save_fs_id: 0,
+            conflict_strategy: None,
+        })];
+        let pm = ShareSyncPersistence::new(&db_dir.join("s.db")).unwrap();
+        pm.upsert_subscription(&s).unwrap();
+        let prev = ShareSnapshot::with_items(&s.id, vec![]);
+        pm.save_snapshot(&prev).unwrap();
+        let curr = ShareSnapshot::with_items(
+            &s.id,
+            vec![
+                ShareSnapshotItem::new("/d", "d", 10, 0, true),
+                item("/d/a.csv", 11, 1),
+                item("/d/b.csv", 12, 1),
+            ],
+        );
+        let diff = diff_snapshots(Some(&prev), &curr);
+        let hooks = MockHooks::default();
+        hooks
+            .batch_transfer_error
+            .lock()
+            .unwrap()
+            .replace(ShareSyncError::TransferError(
+                "目标位置已存在同名文件: d".into(),
+            ));
+        let ex = ShareSyncExecutor::new(&s, &pm, &hooks);
+        let outcome = ex
+            .apply_with_run_id_tree("rt".into(), &captured(), &diff)
+            .await;
+
+        assert_eq!(outcome.status, RunStatus::Completed);
+        assert_eq!(outcome.diff_summary.failed, 0);
+        // 撞重复名直接判「已存在」,不重试 → 仅一次失败的 submit(已 take),不入列。
+        assert_eq!(hooks.batch_transfers.lock().unwrap().len(), 0);
+        let items = pm.list_run_items(&outcome.run_id).unwrap();
+        assert!(!items.is_empty());
+        assert!(items.iter().all(|i| i.status == "completed"));
+    }
+
+    #[tokio::test]
+    async fn test_batch_already_exists_local_falls_back_to_share_direct() {
+        // 网盘+本地合并腿:转存到网盘目标撞「已存在同名」时,网盘副本已在,
+        // 本地副本仍缺 → 改走分享直下(transfer_netdisk_dir=None,临时目录→下载→清理)
+        // 补本地副本,绕开网盘目标同名冲突;成功后标 Completed,不判失败。
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().join("db");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let mut s = sub();
+        s.targets = vec![
+            SyncTarget::Netdisk(NetdiskTarget {
+                remote_path: "/同步".into(),
+                save_fs_id: 0,
+                conflict_strategy: None,
+            }),
+            SyncTarget::Local(LocalTarget {
+                local_path: db_dir.join("local"),
+                conflict_strategy: None,
+                mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
+            }),
+        ];
+        let pm = ShareSyncPersistence::new(&db_dir.join("s.db")).unwrap();
+        pm.upsert_subscription(&s).unwrap();
+        let prev = ShareSnapshot::with_items(&s.id, vec![]);
+        pm.save_snapshot(&prev).unwrap();
+        let curr = ShareSnapshot::with_items(
+            &s.id,
+            vec![
+                ShareSnapshotItem::new("/d", "d", 10, 0, true),
+                item("/d/a.csv", 11, 1),
+                item("/d/b.csv", 12, 1),
+            ],
+        );
+        let diff = diff_snapshots(Some(&prev), &curr);
+        let hooks = MockHooks::default();
+        // 注入一次「已存在同名」错误:本地腿首次(转存到网盘目录)的 submit_download_batch
+        // 命中并被 take;随后分享直下回退那次不再注入 → 成功。
+        hooks
+            .batch_download_error
+            .lock()
+            .unwrap()
+            .replace(ShareSyncError::DownloadError(
+                "目标位置已存在同名文件: d".into(),
+            ));
+        let ex = ShareSyncExecutor::new(&s, &pm, &hooks);
+        let outcome = ex
+            .apply_with_run_id_tree("rt".into(), &captured(), &diff)
+            .await;
+
+        assert_eq!(outcome.status, RunStatus::Completed);
+        assert_eq!(outcome.diff_summary.failed, 0);
+        // 回退确实发生:成功的那次下载是分享直下(netdisk_dir=None)。
+        let dirs = hooks.download_netdisk_dirs.lock().unwrap();
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0], None, "回退必须走分享直下(临时目录),netdisk_dir=None");
+        assert_eq!(hooks.batch_downloads.lock().unwrap().len(), 1);
         let items = pm.list_run_items(&outcome.run_id).unwrap();
         assert!(!items.is_empty());
         assert!(items.iter().all(|i| i.status == "completed"));

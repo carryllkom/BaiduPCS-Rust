@@ -244,6 +244,25 @@ impl ShareSyncError {
         )
     }
 
+    /// 是否为「目标位置已存在同名文件/目录」（百度转存 errno=4 duplicated /
+    /// 异步 task_errno=-30）。
+    ///
+    /// 这类「失败」其实意味着网盘目标里**已经有这份内容**，因此不该判失败:
+    /// - 纯网盘腿 → 目标已满足，视为已转存完成；
+    /// - 本地腿 → 网盘副本已在，改走分享直下（临时目录→下载→清理）补本地副本，
+    ///   绕开网盘目标的同名冲突。
+    ///
+    /// 注意排除「目标路径已存在同名目录，无法用文件覆盖」——那是文件/目录类型冲突，
+    /// 属于真实失败，不能当作「已存在可继续」。
+    pub fn is_already_exists(&self) -> bool {
+        match self {
+            ShareSyncError::TransferError(msg) | ShareSyncError::DownloadError(msg) => {
+                msg.contains("已存在同名") && !msg.contains("无法用文件覆盖")
+            }
+            _ => false,
+        }
+    }
+
     /// 面向用户的可读消息
     ///
     /// 与 `autobackup/error.rs::DiskSpaceFull::user_message` 风格对齐，但不复用
@@ -406,6 +425,32 @@ mod tests {
 
         let e = ShareSyncError::TransferError("转存文件数超限".into());
         assert_eq!(e.category(), ErrorCategory::DirTransferAmbiguous);
+    }
+
+    #[test]
+    fn test_is_already_exists_detection() {
+        // errno=4 duplicated 同步转存:client.rs 文案
+        let e = ShareSyncError::TransferError("目标位置已存在同名文件: 测试2-1".into());
+        assert!(e.is_already_exists());
+        let e = ShareSyncError::TransferError("目标位置已存在同名文件/文件夹".into());
+        assert!(e.is_already_exists());
+        // 异步 task_errno=-30 文案
+        let e = ShareSyncError::TransferError("转存失败：目标目录已存在同名文件".into());
+        assert!(e.is_already_exists());
+        // 下载腿包成 DownloadError 也算
+        let e = ShareSyncError::DownloadError("目标位置已存在同名文件: d".into());
+        assert!(e.is_already_exists());
+
+        // 文件/目录类型冲突 = 真实失败,不能当「已存在可继续」
+        let e = ShareSyncError::TransferError(
+            "目标路径已存在同名目录，无法用文件覆盖: /x".into(),
+        );
+        assert!(!e.is_already_exists());
+        // 无关错误
+        let e = ShareSyncError::TransferError("errno=132 风控".into());
+        assert!(!e.is_already_exists());
+        let e = ShareSyncError::NetworkError("已存在同名".into());
+        assert!(!e.is_already_exists());
     }
 
     #[test]
