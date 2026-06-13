@@ -411,6 +411,111 @@ impl ShareSyncManager {
         Ok(())
     }
 
+    /// 「链接确定性失效」连续失败阈值：达到即自动暂停轮询。可用
+    /// `BAIDUPCS_SHARE_SYNC_LINK_FAIL_THRESHOLD` 覆盖（最小 1），默认 2。
+    fn link_fail_threshold() -> u32 {
+        std::env::var("BAIDUPCS_SHARE_SYNC_LINK_FAIL_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .map(|v| v.max(1))
+            .unwrap_or(2)
+    }
+
+    /// 仅当错误属于「链接确定性失效」时才累加失效计数；临时网络/风控错误不计。
+    fn maybe_note_link_failure(&self, id: &str, err: &ShareSyncError) {
+        if err.is_link_invalid() {
+            self.note_link_failure(id, &err.to_string());
+        }
+    }
+
+    /// 记一次「链接确定性失效」：连续计数 +1；达阈值则置 `link_invalid` 暂停轮询。
+    ///
+    /// 不在此处停 scheduler（本方法在 `execute_one` 内、即 scheduler tick 内被调用，
+    /// 显式 stop 会等自身 task 结束造成死锁）；改由 `execute_one` 在 `link_invalid`
+    /// 时提前返回（不发任何百度请求）实现「不再定时唤起」。
+    fn note_link_failure(&self, id: &str, reason: &str) {
+        let Some(mut sub) = self.subscriptions.get_mut(id) else {
+            return;
+        };
+        if sub.link_invalid {
+            return; // 已暂停，无需重复累加
+        }
+        sub.consecutive_link_failures = sub.consecutive_link_failures.saturating_add(1);
+        let threshold = Self::link_fail_threshold();
+        let mut paused = false;
+        if sub.consecutive_link_failures >= threshold {
+            sub.link_invalid = true;
+            sub.link_invalid_reason = Some(reason.to_string());
+            paused = true;
+        }
+        let count = sub.consecutive_link_failures;
+        let owner_uid = sub.owner_uid;
+        let sub_clone = sub.clone();
+        drop(sub);
+        let _ = self.persistence.upsert_subscription(&sub_clone);
+        if paused {
+            warn!(
+                "share-sync: 订阅 {} 连续 {}/{} 次链接失效，自动暂停轮询: {}",
+                id, count, threshold, reason
+            );
+            self.publisher.publish(ShareSyncEvent::StatusChanged {
+                subscription_id: id.into(),
+                enabled: sub_clone.enabled,
+                owner_uid,
+            });
+        } else {
+            info!(
+                "share-sync: 订阅 {} 链接失效计数 {}/{}（达阈值后将暂停）: {}",
+                id, count, threshold, reason
+            );
+        }
+    }
+
+    /// 成功抓取一次分享 → 链接可用：归零连续失效计数（若曾被标记失效也清除）。
+    fn clear_link_failure(&self, id: &str) {
+        let Some(mut sub) = self.subscriptions.get_mut(id) else {
+            return;
+        };
+        if sub.consecutive_link_failures == 0 && !sub.link_invalid {
+            return; // 无状态可清，省一次写库
+        }
+        sub.consecutive_link_failures = 0;
+        sub.link_invalid = false;
+        sub.link_invalid_reason = None;
+        let sub_clone = sub.clone();
+        drop(sub);
+        let _ = self.persistence.upsert_subscription(&sub_clone);
+    }
+
+    /// 用户「我已更新链接，恢复」：清除失效标记 + 计数，恢复轮询并立即触发一次。
+    pub fn resume_link_invalid(self: &Arc<Self>, id: &str) -> Result<(), ShareSyncError> {
+        {
+            let mut sub = self
+                .subscriptions
+                .get_mut(id)
+                .ok_or_else(|| ShareSyncError::SubscriptionNotFound(id.into()))?;
+            sub.link_invalid = false;
+            sub.link_invalid_reason = None;
+            sub.consecutive_link_failures = 0;
+            sub.touch();
+            let sub_clone = sub.clone();
+            drop(sub);
+            self.persistence.upsert_subscription(&sub_clone)?;
+            // scheduler 从未停过（见 note_link_failure），但防御性确保它在跑
+            if sub_clone.enabled && sub_clone.poll_config.enabled {
+                self.start_scheduler_for(&sub_clone);
+            }
+            self.publisher.publish(ShareSyncEvent::StatusChanged {
+                subscription_id: id.into(),
+                enabled: sub_clone.enabled,
+                owner_uid: sub_clone.owner_uid,
+            });
+        }
+        // 立即重试一次（链接已更新）
+        let _ = self.trigger_one(id);
+        Ok(())
+    }
+
     pub async fn delete_subscription(self: &Arc<Self>, id: &str) -> Result<(), ShareSyncError> {
         let removed = match self.subscriptions.remove(id) {
             Some((_, sub)) => sub,
@@ -494,6 +599,20 @@ impl ShareSyncManager {
             .get_subscription(id)
             .ok_or_else(|| ShareSyncError::SubscriptionNotFound(id.into()))?;
 
+        // 链接已确定性失效（自动暂停）：直接跳过，不发任何百度请求，等用户「恢复」。
+        // 这样调度器即便每轮 tick 也只是空转返回，不再徒劳访问已失效的分享、不增风控压力。
+        if sub.link_invalid {
+            debug!(
+                "share-sync: 订阅 {} 链接已失效（已暂停），跳过本次触发；等待用户更新链接后恢复",
+                id
+            );
+            return Err(ShareSyncError::ShareLinkError(
+                sub.link_invalid_reason
+                    .clone()
+                    .unwrap_or_else(|| "分享链接已失效，已暂停轮询；请更新链接后恢复".into()),
+            ));
+        }
+
         // 多账号隔离：按订阅 owner_uid 解析**该账号**的网盘客户端与转存管理器，
         // 而非进程当前活跃账号。后台调度对账号 A 的订阅始终用账号 A 的实例，
         // 账号切换无需 relink。任一未就绪 → 明确报错，绝不落到错误账号。
@@ -538,14 +657,18 @@ impl ShareSyncManager {
                 Ok(t) => t,
                 Err(e) => {
                     self.fail_run(&run_id, id, owner_uid, &format!("抓取失败: {}", e));
+                    self.maybe_note_link_failure(id, &e);
                     return Err(e);
                 }
             },
             Err(e) => {
                 self.fail_run(&run_id, id, owner_uid, &format!("抓取初始化失败: {}", e));
+                self.maybe_note_link_failure(id, &e);
                 return Err(e);
             }
         };
+        // 成功抓取到分享内容 → 链接可用，归零失效计数（如曾标记失效也清除）。
+        self.clear_link_failure(id);
 
         // 2) 绑定 subscription_id 后，先读"上次成功应用的快照"再计算 diff。
         //    当前快照必须等执行成功后才能推进基线；否则下载/转存失败会把

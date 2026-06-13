@@ -166,6 +166,17 @@ pub struct ShareSubscription {
     /// 反之多账号低风控时可调高(如 8)。仅在 BAIDUPCS_BISECT_PARALLEL=1 时生效。
     #[serde(default)]
     pub max_concurrent_transfers: Option<u32>,
+    /// 连续「链接确定性失效」的失败次数。每次 run 因分享链接失效/提取码失效而失败时
+    /// +1，成功抓取一次即归零。达到阈值后置 `link_invalid=true` 自动暂停轮询。
+    #[serde(default)]
+    pub consecutive_link_failures: u32,
+    /// 链接已确定性失效并被自动暂停：`true` 时调度触发会直接跳过（不再访问百度），
+    /// 等用户更新链接后手动「恢复」清除。
+    #[serde(default)]
+    pub link_invalid: bool,
+    /// 链接失效的可读原因（前端展示，如「分享资源不存在或已失效」）。
+    #[serde(default)]
+    pub link_invalid_reason: Option<String>,
     /// 创建时间
     pub created_at: DateTime<Utc>,
     /// 更新时间
@@ -190,6 +201,9 @@ impl ShareSubscription {
             poll_config: PollConfig::default(),
             enabled: true,
             max_concurrent_transfers: None,
+            consecutive_link_failures: 0,
+            link_invalid: false,
+            link_invalid_reason: None,
             created_at: now,
             updated_at: now,
         }
