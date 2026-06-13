@@ -40,6 +40,8 @@ pub enum TargetKind {
     Netdisk,
     /// 下载到本地
     Local,
+    /// 转存到网盘并下载到本地（一次转存同时满足网盘 + 本地两个目标）
+    NetdiskAndLocal,
 }
 
 impl TargetKind {
@@ -48,6 +50,7 @@ impl TargetKind {
         match self {
             TargetKind::Netdisk => "netdisk",
             TargetKind::Local => "local",
+            TargetKind::NetdiskAndLocal => "netdisk_and_local",
         }
     }
 }
