@@ -35,7 +35,7 @@ use crate::share_sync::types::{ConflictStrategy, RunStatus};
 use crate::transfer::{TransferManager, TransferStatus};
 use async_trait::async_trait;
 use dashmap::DashMap;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -917,6 +917,14 @@ fn should_advance_snapshot_baseline(status: RunStatus) -> bool {
 /// `/dir/file` 造一个 fs_id=0 的 placeholder 目录，最终会退回逐文件提交。这里把
 /// 当前快照中真实存在的目录祖先补进 added，让 tree 路径优先用目录 fs_id 整体转存。
 /// 目录项不计入 summary，也不会被保存为新的基线；它们只影响本次执行计划。
+///
+/// **仅对「整目录全新」的目录补祖先**：树顶若是带真实 fs_id 的目录节点，会走整目录
+/// 转存+整目录下载(folder download 扫描网盘目标里**全部**文件)。若某个已同步目录里
+/// 只改动了个别文件，却把这个目录整体补进来，就会把目录里**未变动的文件也重新转存、
+/// 重新下载一遍**(默认 Overwrite 策略下物理重下)。所以这里加判据：只有当该目录在当前
+/// 快照下的**全部子文件**都属于本次变动集(added∪modified)时,才补成整目录转存;否则保留
+/// placeholder,让 tree 回退到逐文件提交,只下变动的那几个文件。首次同步/全新子目录的
+/// 目录项本就在 diff.added 里,不受此判据影响,仍走整目录高效转存。
 fn execution_diff_with_directory_ancestors(
     diff: &ShareDiff,
     curr: &ShareSnapshot,
@@ -930,8 +938,9 @@ fn execution_diff_with_directory_ancestors(
         .chain(diff.removed.iter().map(|item| item.path.clone()))
         .collect();
 
-    let mut out = diff.clone();
-    let action_paths: Vec<String> = diff
+    // 本次变动涉及的文件路径(added∪modified, 仅文件)。判断目录是否「整目录全新」时,
+    // 要求其全部子文件都落在这个集合里。
+    let changed_files: BTreeSet<String> = diff
         .added
         .iter()
         .chain(diff.modified.iter().map(|m| &m.new))
@@ -939,14 +948,20 @@ fn execution_diff_with_directory_ancestors(
         .map(|item| item.path.clone())
         .collect();
 
+    let mut out = diff.clone();
+    let action_paths: Vec<String> = changed_files.iter().cloned().collect();
+
     let mut added = 0usize;
     for path in action_paths {
         let mut current = parent_netdisk_dir(&path);
         while current != "/" {
             if existing_paths.insert(current.clone()) {
                 if let Some(item) = curr_index.get(&current).filter(|item| item.is_dir) {
-                    out.added.push((**item).clone());
-                    added += 1;
+                    // 仅当整目录子文件全部变动时才整体转存,避免重下未变动文件。
+                    if dir_subtree_fully_changed(&curr_index, &current, &changed_files) {
+                        out.added.push((**item).clone());
+                        added += 1;
+                    }
                 }
             }
             let parent = parent_netdisk_dir(&current);
@@ -959,6 +974,34 @@ fn execution_diff_with_directory_ancestors(
 
     out.added.sort_by(|a, b| a.path.cmp(&b.path));
     (out, added)
+}
+
+/// 判断目录 `dir` 在当前快照下的**全部子文件**(递归)是否都属于本次变动集 `changed`。
+///
+/// 用于决定能否把这个目录整体补进 tree 的整目录转存:只有「整棵子树的文件都是本次新增/
+/// 修改」时才安全(否则会连带重传/重下未变动的文件)。目录里**没有**任何子文件时返回
+/// `false` —— 空目录/纯子目录壳没有整目录转存的价值,留给上层(若其子目录各自满足条件会
+/// 被单独补)处理,避免误把一个含未变动文件的祖先判成「全新」。
+fn dir_subtree_fully_changed(
+    curr_index: &BTreeMap<String, &ShareSnapshotItem>,
+    dir: &str,
+    changed: &BTreeSet<String>,
+) -> bool {
+    let prefix = format!("{}/", dir.trim_end_matches('/'));
+    let mut saw_file = false;
+    for (path, item) in curr_index.range(prefix.clone()..) {
+        if !path.starts_with(&prefix) {
+            break;
+        }
+        if item.is_dir {
+            continue;
+        }
+        saw_file = true;
+        if !changed.contains(path) {
+            return false;
+        }
+    }
+    saw_file
 }
 
 // =====================================================
@@ -2146,6 +2189,98 @@ mod tests {
         ] {
             assert!(!is_terminal_subtask_status(s), "{s} 不应判终态");
         }
+    }
+
+    // ===== execution_diff_with_directory_ancestors：整目录转存只在「整目录全新」时启用 =====
+
+    fn ss_file(path: &str, fs_id: u64, size: u64) -> ShareSnapshotItem {
+        let name = path.rsplit('/').next().unwrap_or(path).to_string();
+        ShareSnapshotItem::new(path, name, fs_id, size, false)
+    }
+    fn ss_dir(path: &str, fs_id: u64) -> ShareSnapshotItem {
+        let name = path.rsplit('/').next().unwrap_or(path).to_string();
+        ShareSnapshotItem::new(path, name, fs_id, 0, true)
+    }
+
+    #[test]
+    fn test_exec_diff_promotes_dir_only_when_subtree_fully_new() {
+        // 首次同步：/d 整目录全新（2 个文件 + 目录项都在 added）→ 应保留/补成整目录转存。
+        let curr = ShareSnapshot::with_items(
+            "sub",
+            vec![
+                ss_dir("/d", 100),
+                ss_file("/d/a", 1, 10),
+                ss_file("/d/b", 2, 20),
+            ],
+        );
+        let diff = diff_snapshots(None, &curr); // prev=None → 全部 added（含目录项 /d）
+        let (out, _added) = execution_diff_with_directory_ancestors(&diff, &curr);
+        // /d 已在 added 里（目录项），整目录转存可用。
+        assert!(out.added.iter().any(|i| i.path == "/d" && i.is_dir));
+    }
+
+    #[test]
+    fn test_exec_diff_does_not_promote_partially_changed_dir() {
+        // 增量：/d 已同步，仅新增 /d/c。/d 本身未变（不在 diff），不应被补成整目录转存，
+        // 否则会把未变动的 /d/a、/d/b 也整目录重下。
+        let prev = ShareSnapshot::with_items(
+            "sub",
+            vec![
+                ss_dir("/d", 100),
+                ss_file("/d/a", 1, 10),
+                ss_file("/d/b", 2, 20),
+            ],
+        );
+        let curr = ShareSnapshot::with_items(
+            "sub",
+            vec![
+                ss_dir("/d", 100),
+                ss_file("/d/a", 1, 10),
+                ss_file("/d/b", 2, 20),
+                ss_file("/d/c", 3, 30),
+            ],
+        );
+        let diff = diff_snapshots(Some(&prev), &curr);
+        assert_eq!(diff.added.len(), 1);
+        assert_eq!(diff.added[0].path, "/d/c");
+
+        let (out, added) = execution_diff_with_directory_ancestors(&diff, &curr);
+        // 不补 /d（含未变动文件），added 集合里不应出现目录 /d。
+        assert_eq!(added, 0, "含未变动文件的目录不应被补成整目录转存");
+        assert!(!out.added.iter().any(|i| i.path == "/d"));
+        // 仍只携带变动的那个文件。
+        assert_eq!(out.added.len(), 1);
+        assert_eq!(out.added[0].path, "/d/c");
+    }
+
+    #[test]
+    fn test_dir_subtree_fully_changed_predicate() {
+        let curr = ShareSnapshot::with_items(
+            "sub",
+            vec![
+                ss_dir("/d", 100),
+                ss_file("/d/a", 1, 10),
+                ss_file("/d/sub/x", 4, 40),
+            ],
+        );
+        let idx = curr.index_by_path();
+
+        // 全部子文件都变 → true
+        let all: BTreeSet<String> =
+            ["/d/a".to_string(), "/d/sub/x".to_string()].into_iter().collect();
+        assert!(dir_subtree_fully_changed(&idx, "/d", &all));
+
+        // 只变一部分（缺 /d/sub/x） → /d 整体 false
+        let some: BTreeSet<String> = ["/d/a".to_string()].into_iter().collect();
+        assert!(!dir_subtree_fully_changed(&idx, "/d", &some));
+
+        // 嵌套子目录视角：/d/sub 的全部文件(/d/sub/x)都变 → true
+        let sub_only: BTreeSet<String> = ["/d/sub/x".to_string()].into_iter().collect();
+        assert!(dir_subtree_fully_changed(&idx, "/d/sub", &sub_only));
+
+        // 空集合 / 无子文件 → false（不误判为全新）
+        let none: BTreeSet<String> = BTreeSet::new();
+        assert!(!dir_subtree_fully_changed(&idx, "/d", &none));
     }
 
     #[test]
