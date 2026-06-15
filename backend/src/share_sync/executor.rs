@@ -241,13 +241,16 @@ impl<'a> ShareSyncExecutor<'a> {
     ///   作落点（转存后保留、不清理）。这一份网盘副本同时满足「网盘目标」，
     ///   因此 `effective_transfer_ops` 不再额外起一条独立网盘转存腿，避免重复转存。
     /// - 订阅**无**网盘目标 → `None`：分享直下（转存到临时目录 → 下载 → 清理）。
-    fn transfer_netdisk_dir_for_local(
-        &self,
-        _local: &LocalTarget,
-        item: &ShareSnapshotItem,
-    ) -> Option<String> {
+    ///
+    /// 落点取网盘目标的 **remote_path 根目录**（与 `transfer_netdisk_root_for_local`
+    /// 一致），由 `TransferManager` 内部按 item 路径重建子目录。
+    /// 不能用 `netdisk_target_parent_dir`（= 根目录 + item 相对父目录）：
+    /// `group_files_by_parent_dir` 还会再拼一次 item 的相对父目录，单文件会落到
+    /// `<root>/测试2-1/测试2-1/文件`（目录名翻倍），且与 `netdisk_target_file_path`
+    /// 的存在性判定路径不一致，下次同步会被判缺失而重复转存。
+    fn transfer_netdisk_dir_for_local(&self, _local: &LocalTarget) -> Option<String> {
         self.subscription.targets.iter().find_map(|t| match t {
-            SyncTarget::Netdisk(net) => Some(netdisk_target_parent_dir(net, item)),
+            SyncTarget::Netdisk(net) => Some(net.remote_path.clone()),
             _ => None,
         })
     }
@@ -1826,7 +1829,11 @@ impl<'a> ShareSyncExecutor<'a> {
             // 2) 提交 transfer / download
             let result: Result<(String, bool, RunItemStatus), ShareSyncError> = match target {
                 SyncTarget::Netdisk(t) => {
-                    let target_dir = netdisk_target_parent_dir(t, item);
+                    // 落点用 remote_path 根目录，由 TransferManager 内部按 item 路径
+                    // 重建子目录；submit_transfer 的实现注释要求 target_dir 即根目录。
+                    // 不能用 netdisk_target_parent_dir（根 + item 相对父目录），否则
+                    // group_files_by_parent_dir 会再拼一次相对父目录导致目录名翻倍。
+                    let target_dir = t.remote_path.clone();
                     self.hooks
                         .submit_transfer(
                             captured,
@@ -1838,7 +1845,7 @@ impl<'a> ShareSyncExecutor<'a> {
                         .map(|task_id| (task_id, false, RunItemStatus::Transferring))
                 }
                 SyncTarget::Local(t) => {
-                    let netdisk_dir = self.transfer_netdisk_dir_for_local(t, item);
+                    let netdisk_dir = self.transfer_netdisk_dir_for_local(t);
                     self.hooks
                         .submit_download(item, &t.local_path, strategy, netdisk_dir.as_deref())
                         .await
@@ -2213,10 +2220,6 @@ fn netdisk_target_file_path(target: &NetdiskTarget, item: &ShareSnapshotItem) ->
     join_netdisk_path(&target.remote_path, item.path.trim_start_matches('/'))
 }
 
-fn netdisk_target_parent_dir(target: &NetdiskTarget, item: &ShareSnapshotItem) -> String {
-    parent_netdisk_dir(&netdisk_target_file_path(target, item))
-}
-
 pub(crate) fn join_netdisk_path(base: &str, relative: &str) -> String {
     let base = base.trim_end_matches('/');
     let relative = relative.trim_start_matches('/');
@@ -2229,6 +2232,8 @@ pub(crate) fn join_netdisk_path(base: &str, relative: &str) -> String {
     }
 }
 
+/// 仅测试 mock 使用（生产路径改用 remote_path 根目录后不再需要回算父目录）。
+#[cfg(test)]
 pub(crate) fn parent_netdisk_dir(path: &str) -> String {
     let path = path.trim_end_matches('/');
     if path.is_empty() || path == "/" {
@@ -2824,10 +2829,54 @@ mod tests {
         // 只有一条下载腿（合并），没有独立网盘转存腿
         assert_eq!(hooks.transfers.lock().unwrap().len(), 0);
         assert_eq!(hooks.downloads.lock().unwrap().len(), 1);
-        // 该下载腿带着网盘中转目录（非 None）→ 先转存到网盘并保留这份副本再下载
+        // 该下载腿带着网盘中转目录（非 None）→ 先转存到网盘并保留这份副本再下载。
+        // 落点必须是网盘目标根目录 /x（由 TransferManager 按 item 路径重建子目录），
+        // 而不是 netdisk_target_parent_dir（会导致单文件目录名翻倍）。
         let dirs = hooks.download_netdisk_dirs.lock().unwrap();
         assert_eq!(dirs.len(), 1);
-        assert!(dirs[0].is_some(), "合并腿应携带网盘中转目录，实际={:?}", dirs[0]);
+        assert_eq!(dirs[0].as_deref(), Some("/x"), "合并腿落点应为网盘根目录");
+    }
+
+    /// 回归：合并腿下载子目录里的单文件时，网盘中转落点仍是 remote_path 根目录，
+    /// 不能带上 item 的相对父目录——否则 TransferManager 再拼一次会得到
+    /// `/x/测试2-1/测试2-1/...`（目录名翻倍），且与存在性判定路径不一致触发重复转存。
+    #[test]
+    fn test_merge_leg_nested_file_netdisk_dir_is_root_no_doubling() {
+        let dir = tempdir().unwrap();
+        let s = {
+            let mut s = sub();
+            s.targets = vec![
+                SyncTarget::Netdisk(NetdiskTarget {
+                    remote_path: "/x".into(),
+                    save_fs_id: 0,
+                    conflict_strategy: None,
+                }),
+                SyncTarget::Local(LocalTarget {
+                    local_path: dir.path().to_path_buf(),
+                    conflict_strategy: None,
+                    mode: crate::share_sync::config::LocalSyncMode::ShareDirect,
+                }),
+            ];
+            s
+        };
+        let pm = ShareSyncPersistence::new(&dir.path().join("s.db")).unwrap();
+        pm.upsert_subscription(&s).unwrap();
+        let prev = ShareSnapshot::with_items(&s.id, vec![]);
+        pm.save_snapshot(&prev).unwrap();
+        // 子目录里新增单文件（增量场景）
+        let curr = ShareSnapshot::with_items(&s.id, vec![item("/测试2-1/CONFLICT.md", 7, 5)]);
+        let diff = diff_snapshots(Some(&prev), &curr);
+        let hooks = MockHooks::default();
+        let ex = ShareSyncExecutor::new(&s, &pm, &hooks);
+        let outcome = futures::executor::block_on(ex.apply(&captured(), &diff));
+        assert_eq!(outcome.status, RunStatus::Completed);
+        let dirs = hooks.download_netdisk_dirs.lock().unwrap();
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(
+            dirs[0].as_deref(),
+            Some("/x"),
+            "子目录单文件的网盘落点应为根目录 /x，不应为 /x/测试2-1（翻倍）"
+        );
     }
 
     /// 只开网盘目标 → 一条网盘转存腿，无下载。

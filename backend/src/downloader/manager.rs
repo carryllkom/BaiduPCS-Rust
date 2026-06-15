@@ -49,6 +49,19 @@ pub struct AutoRequeueRequest {
     pub reason: String,
 }
 
+/// 下载任务「聚合用」终态查询结果（见 `DownloadManager::lookup_aggregate_outcome`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DownloadAggregateOutcome {
+    /// 任务仍在内存任务表中，附带其当前状态。
+    InMemory(TaskStatus),
+    /// 内存中已不存在，但历史库标记为已完成（快速完成后被归档移除）。
+    ArchivedCompleted,
+    /// 内存中已不存在，历史库标记为失败。
+    ArchivedFailed,
+    /// 内存与历史库均查不到（真正取消/丢失）。
+    NotFound,
+}
+
 /// 下载管理器
 #[derive(Debug)]
 pub struct DownloadManager {
@@ -5063,6 +5076,34 @@ impl DownloadManager {
         }
     }
 
+    /// 🔥 解析下载任务的「聚合用」终态：先查内存，内存查不到再查历史库。
+    ///
+    /// 背景：小文件下载极快（如几 KB），完成后会立即「标记完成 + 归档到历史库 +
+    /// 从内存任务表移除」。转存任务的下载状态监听器每 2s 轮询一次，若在这之间任务
+    /// 已被归档移除，仅查内存（`get_task` 返回 None）会把「已完成并归档」误判为
+    /// 「已取消」，导致转存状态从 Downloading 回退成 Transferred → share-sync 把本
+    /// 已成功的子项标记为失败。这里补查历史库，区分「已归档完成/失败」与「真正丢失」。
+    pub async fn lookup_aggregate_outcome(&self, task_id: &str) -> DownloadAggregateOutcome {
+        if let Some(task) = self.tasks.read().await.get(task_id) {
+            return DownloadAggregateOutcome::InMemory(task.lock().await.status.clone());
+        }
+        if let Some(ref pm) = self.persistence_manager {
+            if let Some(meta) = pm.lock().await.get_history_task(task_id) {
+                use crate::persistence::types::TaskPersistenceStatus;
+                match meta.status {
+                    Some(TaskPersistenceStatus::Completed) => {
+                        return DownloadAggregateOutcome::ArchivedCompleted
+                    }
+                    Some(TaskPersistenceStatus::Failed) => {
+                        return DownloadAggregateOutcome::ArchivedFailed
+                    }
+                    _ => {}
+                }
+            }
+        }
+        DownloadAggregateOutcome::NotFound
+    }
+
     /// 检查任务是否存在于内存或持久化存储中
     pub async fn has_task_anywhere(&self, task_id: &str) -> bool {
         let tasks = self.tasks.read().await;
@@ -7142,5 +7183,75 @@ mod tests {
                 "register 后，部分进度不能被清零"
             );
         }
+    }
+
+    /// 回归：小文件下载完成并归档后，`lookup_aggregate_outcome` 不能把它当成「丢失/取消」。
+    ///
+    /// 复现 share-sync 增量单文件失败：5KB 文件下载极快，完成瞬间被归档到历史库并从
+    /// 内存移除；转存状态监听器 2s 后聚合时若仅查内存会判 NotFound→cancelled→转存回退
+    /// Transferred→run 误报 failed。补查历史库后应识别为 ArchivedCompleted。
+    #[tokio::test]
+    async fn test_lookup_aggregate_outcome_archived_completed_not_lost() {
+        use crate::persistence::types::{TaskMetadata, TaskPersistenceStatus};
+
+        let temp_dir = TempDir::new().unwrap();
+        let pm_config = crate::config::PersistenceConfig {
+            wal_dir: "wal".to_string(),
+            db_path: "config/baidu-pcs.db".to_string(),
+            wal_flush_interval_ms: 100,
+            auto_recover_tasks: true,
+            wal_retention_days: 7,
+            history_archive_hour: 2,
+            history_archive_minute: 0,
+            history_retention_days: 30,
+        };
+        let pm = crate::persistence::PersistenceManager::new(pm_config, temp_dir.path());
+
+        // 模拟「下载完成 → 归档到历史库」：写入一条 status=Completed 的下载历史。
+        let mut meta = TaskMetadata::new_download(
+            "dl_fast".to_string(),
+            42,
+            "/13/分享同步测试/测试2-1/CONFLICT.md".to_string(),
+            temp_dir.path().join("CONFLICT.md"),
+            5 * 1024,
+            4 * 1024 * 1024,
+            1,
+            None,
+            None,
+        );
+        meta.set_status(TaskPersistenceStatus::Completed);
+        pm.history_db()
+            .expect("history_db enabled")
+            .add_task_to_history(&meta)
+            .unwrap();
+
+        let user_auth = create_mock_user_auth();
+        let mut manager =
+            DownloadManager::new(user_auth, temp_dir.path().to_path_buf()).await.unwrap();
+        manager.persistence_manager = Some(Arc::new(Mutex::new(pm)));
+
+        // 内存中并无该任务（已完成移除），但历史库标记 Completed。
+        assert!(manager.get_task("dl_fast").await.is_none());
+        assert_eq!(
+            manager.lookup_aggregate_outcome("dl_fast").await,
+            DownloadAggregateOutcome::ArchivedCompleted,
+            "已归档完成的快速任务不能被误判为丢失/取消"
+        );
+
+        // 内存中的在途任务仍按内存状态返回。
+        let live_id = manager
+            .create_task(7, "/remote/live.bin".to_string(), "live.bin".to_string(), 1024, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.lookup_aggregate_outcome(&live_id).await,
+            DownloadAggregateOutcome::InMemory(TaskStatus::Pending),
+        );
+
+        // 任何地方都查不到的任务才算 NotFound。
+        assert_eq!(
+            manager.lookup_aggregate_outcome("does_not_exist").await,
+            DownloadAggregateOutcome::NotFound,
+        );
     }
 }
