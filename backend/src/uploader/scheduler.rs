@@ -1435,7 +1435,11 @@ impl UploadChunkScheduler {
                     // 更新任务状态
                     let chunk_is_backup = {
                         let mut t = task_info.task.lock().await;
-                        t.uploaded_size = new_uploaded;
+                        // 🔥 钳制 uploaded_size 不超过 total_size：分片重试/续传重复累加，
+                        // 或上传期间源文件仍在增长（如录制中的 .ts），都会让原子累加值超过
+                        // 创建任务时的总大小，导致「已上传 > 总大小」「进度 > 100%」。
+                        // 与下载引擎 min(new_size, total_size) 对齐。
+                        t.uploaded_size = std::cmp::min(new_uploaded, t.total_size);
                         t.completed_chunks = completed_chunks;
                         t.total_chunks = total_chunks;
                         if speed > 0 {
@@ -1455,7 +1459,8 @@ impl UploadChunkScheduler {
                             if should_emit {
                                 let total_size = task_info.total_size;
                                 let progress = if total_size > 0 {
-                                    ( t.uploaded_size  as f64 / total_size as f64) * 100.0
+                                    ((t.uploaded_size as f64 / total_size as f64) * 100.0)
+                                        .clamp(0.0, 100.0)
                                 } else {
                                     0.0
                                 };
