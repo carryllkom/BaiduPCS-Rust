@@ -115,7 +115,7 @@ const totalSpaceFormatted = computed(() => {
 
 const storagePercentage = computed(() => {
   if (!props.user?.total_space) return 0
-  return Math.round((props.user.used_space || 0) / props.user.total_space * 100)
+  return Math.min(100, Math.max(0, Math.round((props.user.used_space || 0) / props.user.total_space * 100)))
 })
 
 const storageColor = computed(() => {

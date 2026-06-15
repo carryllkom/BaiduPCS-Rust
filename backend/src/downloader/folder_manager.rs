@@ -904,8 +904,7 @@ impl FolderDownloadManager {
                 // 获取该文件夹的所有活跃子任务
                 let tasks = dm.get_tasks_by_group(&folder_id).await;
 
-                // 🔥 计算活跃子任务的已下载字节数和速度
-                let active_downloaded: u64 = tasks.iter().map(|t| t.downloaded_size).sum();
+                // 🔥 速度只统计仍在下载中的子任务
                 let speed: u64 = tasks
                     .iter()
                     .filter(|t| t.status == TaskStatus::Downloading)
@@ -917,6 +916,11 @@ impl FolderDownloadManager {
                 let downloaded_size = {
                     let mut folders_guard = folders.write().await;
                     if let Some(folder) = folders_guard.get_mut(&folder_id) {
+                        // 🔥 排除已计入 completed_downloaded_size 的子任务再求 active_sum，
+                        // 否则完成瞬间残留任务会被双重累加并被 max() 永久锁死（已下载翻倍 200%）。
+                        let active_downloaded = folder.active_downloaded_excluding_counted(
+                            tasks.iter().map(|t| (t.id.as_str(), t.downloaded_size)),
+                        );
                         folder.compute_downloaded_size(active_downloaded)
                     } else {
                         continue;
@@ -3446,7 +3450,11 @@ impl FolderDownloadManager {
 
                 // 🔥 使用 compute_downloaded_size：completed_downloaded_size + active_sum
                 // max() 保证单调性
-                let active_downloaded: u64 = tasks.iter().map(|t| t.downloaded_size).sum();
+                // 🔥 排除已计入 completed_downloaded_size 的子任务，避免完成瞬间残留任务被
+                // active_sum 与 completed_downloaded_size 双重累加导致已下载翻倍（见进度监听器注释）。
+                let active_downloaded = folder.active_downloaded_excluding_counted(
+                    tasks.iter().map(|t| (t.id.as_str(), t.downloaded_size)),
+                );
                 folder.compute_downloaded_size(active_downloaded);
 
                 // 检查是否全部完成（成功 + 失败 >= 总数）
