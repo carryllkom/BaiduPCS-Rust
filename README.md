@@ -314,7 +314,7 @@ decrypt-cli decrypt --key-file encryption.json --in file.dat --out file.txt --ke
 #### v1.14.1
 
 **新功能：**
-- ✨ **下载目录权限提示（Linux/macOS）**：文件选择弹窗显示目录属主/运行用户/是否可写，下载前即可发现权限不匹配；可写性判断用内核 `faccessat`，正确覆盖 root/附加组/ACL（感谢 @hamr-hub PR #91）
+- ✨ **下载目录权限提示（Linux/macOS）**：文件选择弹窗显示目录属主/运行用户/是否可写，下载前即可发现权限不匹配；可写性判断用内核 `faccessat`，正确覆盖 root/附加组/ACL
 - ✨ **本地部署脚本 `scripts/local-deploy.sh`**：不依赖 Docker，一键构建/启停后端+前端，支持 status/logs 与 systemd 开机自启
 
 **问题修复：**
