@@ -653,10 +653,12 @@ async fn upload_single_chunk(
                     uploaded_bytes.fetch_add(chunk_size, Ordering::SeqCst) + chunk_size;
 
                 // 标记分片完成
-                let (completed_chunks, total_chunks) = {
+                // 🔥 uploaded_idempotent = 已完成分片大小之和（幂等、永不超过 total）。
+                // 用它而非原子 fetch_add 计数来写回进度，详见下方 t.uploaded_size 赋值处。
+                let (completed_chunks, total_chunks, uploaded_idempotent) = {
                     let mut cm = chunk_manager.lock().await;
                     cm.mark_completed(chunk.index, Some(response.md5.clone()));
-                    (cm.completed_count(), cm.chunk_count())
+                    (cm.completed_count(), cm.chunk_count(), cm.uploaded_bytes())
                 };
 
                 // 计算上传速度（每次分片完成都更新）
@@ -685,11 +687,12 @@ async fn upload_single_chunk(
                 // 更新任务状态（关键：前端通过这些字段获取进度）
                 {
                     let mut t = task.lock().await;
-                    // 🔥 钳制 uploaded_size 不超过 total_size：分片重试/续传重复累加，
-                    // 或上传期间源文件仍在增长（如录制中的 .ts），都会让原子累加值超过
-                    // 创建任务时的总大小，导致「已上传 > 总大小」「进度 > 100%」。
-                    // 与下载引擎 (downloader/engine.rs 的 min(new_size, total_size)) 对齐。
-                    t.uploaded_size = std::cmp::min(new_uploaded, t.total_size);
+                    // 🔥 用「已完成分片之和」作为已上传字节，而非原子 fetch_add 计数器。
+                    // 原子计数器在分片被重复上传（upload_id 过期重传、失败重派等）时会把同一
+                    // 段字节累加多次 → 「已上传 > 总大小」「进度 > 100%」(实测 142%)。而
+                    // chunk_manager.uploaded_bytes() 是已完成分片 size 之和，幂等、天然 ≤ total，
+                    // 重复上传同一分片也只计一次；并能在断点恢复时立即反映已完成进度。
+                    t.uploaded_size = std::cmp::min(uploaded_idempotent, t.total_size);
                     t.completed_chunks = completed_chunks;
                     t.total_chunks = total_chunks;
                     if speed > 0 {
