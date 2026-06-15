@@ -3200,19 +3200,26 @@ impl TransferManager {
                     failed_count += 1;
                 }
             } else {
-                // 普通文件下载任务：查询 DownloadManager
-                if let Some(task) = dm.get_task(task_id).await {
-                    match task.status {
+                // 普通文件下载任务：查询 DownloadManager。
+                // 🔥 小文件下载极快，完成瞬间就会「归档到历史库 + 从内存移除」。本监听器
+                // 每 2s 才轮询一次，若仅查内存（get_task 返回 None）会把「已完成并归档」
+                // 误判为「已取消」→ cancelled==total → 转存状态回退成 Transferred →
+                // share-sync 把本已成功的子项标记为失败。改用 lookup_aggregate_outcome
+                // 补查历史库，区分「已归档完成/失败」与「真正丢失」。
+                use crate::downloader::manager::DownloadAggregateOutcome;
+                match dm.lookup_aggregate_outcome(task_id).await {
+                    DownloadAggregateOutcome::InMemory(status) => match status {
                         TaskStatus::Completed => completed_count += 1,
                         TaskStatus::Failed => failed_count += 1,
                         TaskStatus::Downloading => downloading_count += 1,
                         TaskStatus::Decrypting => downloading_count += 1, // 解密中视为进行中
                         TaskStatus::Paused => paused_count += 1,
                         TaskStatus::Pending => downloading_count += 1, // 视为进行中
-                    }
-                } else {
-                    // 任务不存在，视为已取消
-                    cancelled_count += 1;
+                    },
+                    DownloadAggregateOutcome::ArchivedCompleted => completed_count += 1,
+                    DownloadAggregateOutcome::ArchivedFailed => failed_count += 1,
+                    // 任务在内存与历史库均不存在，视为已取消
+                    DownloadAggregateOutcome::NotFound => cancelled_count += 1,
                 }
             }
         }
