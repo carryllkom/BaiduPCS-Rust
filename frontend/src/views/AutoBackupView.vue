@@ -450,13 +450,13 @@ function formatBytes(bytes: number): string {
 // 计算备份任务进度百分比
 function calcBackupPercent(task: BackupTask): number {
   if (task.total_bytes === 0) return 0
-  return Math.round((task.transferred_bytes / task.total_bytes) * 100)
+  return Math.min(100, Math.max(0, Math.round((task.transferred_bytes / task.total_bytes) * 100)))
 }
 
 // 计算文件任务进度百分比
 function calcFilePercent(fileTask: BackupFileTask): number {
   if (fileTask.file_size === 0) return 0
-  return Math.round((fileTask.transferred_bytes / fileTask.file_size) * 100)
+  return Math.min(100, Math.max(0, Math.round((fileTask.transferred_bytes / fileTask.file_size) * 100)))
 }
 
 // 格式化文件已传输大小
