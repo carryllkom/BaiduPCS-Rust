@@ -384,8 +384,58 @@ impl ChunkScheduler {
 
         // 启动全局调度循环
         scheduler.start_scheduling();
+        // 启动速度刷新循环（必须在 start_scheduling 之后：scheduler_running 由它置位）
+        scheduler.start_speed_refresh_loop();
 
         scheduler
+    }
+
+    /// 每 500ms 刷新一次活跃任务的瞬时速度。
+    ///
+    /// `task.speed` 原本只在 `progress_callback` 里重算，而回调只在**有数据时**才触发。
+    /// 网络停滞时没有任何东西会去重算它，界面上的数字就一直冻在最后那个值
+    /// （实测见过卡在 5.33 MB/s 好几秒）。这个循环按固定频率把空闲时间灌进速度窗口，
+    /// 让速度自然衰减到 0。
+    ///
+    /// **只更新速度，不发布进度事件**：进度事件仍由数据路径经 `ProgressThrottler`
+    /// 节流发布。把全系统的进度推送（WS 事件、文件夹聚合、备份通知）都压到单一
+    /// 定时循环上收益有限，却会让这条循环成为唯一故障点。
+    fn start_speed_refresh_loop(&self) {
+        const REFRESH_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_millis(500);
+
+        let active_tasks = self.active_tasks.clone();
+        let scheduler_running = self.scheduler_running.clone();
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(REFRESH_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            while scheduler_running.load(Ordering::SeqCst) {
+                interval.tick().await;
+
+                // 只克隆 Arc，不克隆整个 TaskScheduleInfo；也不在持有 active_tasks
+                // 读锁的情况下去抢任务锁，避免和调度循环互相等待。
+                let tasks: Vec<_> = {
+                    let tasks = active_tasks.read().await;
+                    tasks
+                        .values()
+                        .map(|info| (info.task.clone(), info.speed_calc.clone()))
+                        .collect()
+                };
+
+                for (task, speed_calc) in tasks {
+                    let mut t = task.lock().await;
+                    if t.status != crate::downloader::TaskStatus::Downloading {
+                        t.speed = 0;
+                        continue;
+                    }
+                    // 与下载回调保持一致的加锁顺序：task -> speed_calc
+                    t.speed = speed_calc.lock().await.refresh();
+                }
+            }
+
+            debug!("速度刷新循环已退出");
+        });
     }
 
     // 多账号下载配额唯一构造入口 = `new` 必填 `budget_scheduler` + `decrypt_semaphore` +
@@ -469,6 +519,17 @@ impl ChunkScheduler {
     /// 将任务添加到活跃任务列表，不再限制并发数（由任务槽控制）
     pub async fn register_task(&self, mut task_info: TaskScheduleInfo) -> Result<()> {
         let task_id = task_info.task_id.clone();
+
+        // 🔥 在任何分片开始写入前建立累计字节基线。
+        //
+        // 必须先 reset：暂停后恢复 / 重试会复用同一个计算器，残留的旧快照会把分母
+        // 拉到「上一轮开始的时刻」——暂停 5 分钟再恢复，速度会被稀释到接近 0，
+        // 而且要等旧快照滚出整个窗口才恢复正常。
+        {
+            let mut calc = task_info.speed_calc.lock().await;
+            calc.reset();
+            calc.refresh();
+        }
 
         // 🔥 如果是备份任务，注入调度器的 backup_notification_tx
         {

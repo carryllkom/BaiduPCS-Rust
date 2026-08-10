@@ -1,23 +1,33 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-/// 速度分母下限（秒）。
-///
-/// 刚开始下载的头一小段时间里「已运行时长」还很小，若直接拿它当分母，
-/// 一个分片落盘就会算出天文数字。取下限后起步阶段宁可低估也不虚高。
-const MIN_SPEED_DENOM_SECS: f64 = 1.0;
+/// 默认统计窗口长度。
+const DEFAULT_WINDOW_SECONDS: u64 = 10;
 
-/// 速度计算器（使用滑动窗口）
+/// 两个快照之间的最小间隔。
+///
+/// 下载回调的触发频率由 `chunk.rs` 的「256KB 或 500ms」双阈值决定，高速下载时
+/// 一秒可能回调几十次。按固定间隔落点可以让窗口内的快照数量有上界，
+/// 也让速度不随回调疏密漂移。
+const SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
+
+/// 速度测量所需的最小时间跨度。
+///
+/// 跨度不足一秒时宁可报 0，也不拿几十毫秒的样本外推 —— 那正是分母塌缩的来源。
+const MIN_MEASUREMENT_DURATION: Duration = Duration::from_secs(1);
+
+/// 速度计算器（累计字节快照 + 滑动窗口）
 #[derive(Debug)]
 pub struct SpeedCalculator {
-    /// 数据点（时间，字节数）
+    /// 数据点（单调时刻，该时刻的**累计**字节数）
+    ///
+    /// 存累计值而非增量：速度直接由「两个快照的字节差 ÷ 两个快照的时间差」得出，
+    /// 分子分母取自同一对时间点，天然自洽。
     samples: VecDeque<(Instant, u64)>,
-    /// 窗口大小（秒）
+    /// 统计窗口长度
     window_size: Duration,
     /// 累计下载字节数
     total_bytes: u64,
-    /// 第一个样本的时刻，用于起步阶段的分母（见 [`SpeedCalculator::speed`]）
-    started_at: Option<Instant>,
 }
 
 impl SpeedCalculator {
@@ -25,80 +35,103 @@ impl SpeedCalculator {
     pub fn new(window_seconds: u64) -> Self {
         Self {
             samples: VecDeque::new(),
-            window_size: Duration::from_secs(window_seconds),
+            window_size: Duration::from_secs(window_seconds.max(1)),
             total_bytes: 0,
-            started_at: None,
         }
     }
 
-    /// 使用默认窗口大小（5秒）
+    /// 使用默认窗口大小（10 秒）
     pub fn with_default_window() -> Self {
-        Self::new(5)
+        Self::new(DEFAULT_WINDOW_SECONDS)
     }
 
-    /// 添加数据点
+    /// 累加收到的字节，并按 [`SAMPLE_INTERVAL`] 落快照
     pub fn add_sample(&mut self, bytes: u64) {
-        let now = Instant::now();
-        self.started_at.get_or_insert(now);
-        self.total_bytes += bytes;
-        self.samples.push_back((now, bytes));
+        self.add_sample_at(bytes, Instant::now());
+    }
+
+    /// 记录一个定时快照并返回当前速度。
+    ///
+    /// 即使没有新字节也要定期调用，让窗口里的空闲时间参与平均 —— 否则下载停滞时
+    /// 最老的快照永远滚不出窗口，速度会一直停在最后那个值不动
+    /// （实测见过卡在 5.33 MB/s 好几秒）。调用方见 `ChunkScheduler` 的刷新循环。
+    pub fn refresh(&mut self) -> u64 {
+        self.refresh_at(Instant::now())
+    }
+
+    fn add_sample_at(&mut self, bytes: u64, now: Instant) {
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
+        self.record_snapshot(now);
+    }
+
+    fn refresh_at(&mut self, now: Instant) -> u64 {
+        self.record_snapshot(now);
+        self.speed_at(now)
+    }
+
+    fn record_snapshot(&mut self, now: Instant) {
+        let should_record = self
+            .samples
+            .back()
+            .map(|(timestamp, _)| now.duration_since(*timestamp) >= SAMPLE_INTERVAL)
+            .unwrap_or(true);
+
+        if should_record {
+            self.samples.push_back((now, self.total_bytes));
+        }
         self.cleanup_old_samples(now);
     }
 
-    /// 清理超出窗口的旧数据
+    /// 清理超出窗口的旧快照，但**保留一个窗口边界之外的基准点**。
+    ///
+    /// 判据用 `samples[1]` 而不是 `samples[0]`：只要第二个快照还在窗口内，
+    /// 第一个就得留着当基准 —— 速度是「差值 ÷ 时间差」，没有左端点就没法算。
     fn cleanup_old_samples(&mut self, now: Instant) {
-        while let Some((timestamp, _)) = self.samples.front() {
-            if now.duration_since(*timestamp) > self.window_size {
-                self.samples.pop_front();
-            } else {
-                break;
-            }
+        while self.samples.len() > 1 && now.duration_since(self.samples[1].0) > self.window_size {
+            self.samples.pop_front();
         }
     }
 
     /// 计算当前速度（字节/秒）
     ///
-    /// 分母取**固定的窗口长度**（起步阶段取"已运行时长"），而不是"最早样本到现在"。
+    /// 最初的实现是 `窗口内字节数 / (now - 最早样本时间)`，分子分母口径不一致，
+    /// 样本稀疏时分母会塌缩：下载按分片落盘，`progress_callback` 并非匀速调用 ——
+    /// 实测出现过「连续 5 秒 downloaded 不动，然后一次跳 256KB」，那一刻窗口里
+    /// 只剩一两个间隔几十毫秒的样本，算出 `256KB / 0.05s ≈ 5.2 MB/s`，而真实
+    /// 速率只有约 65 KB/s，界面上表现为速度在 0 / 285KB/s / 5.2MB/s 之间乱跳。
     ///
-    /// 原实现是 `窗口内字节数 / (now - 最早样本时间)`，样本稀疏时分母会塌缩：
-    /// 下载是按分片落盘的，`progress_callback` 并非匀速调用 —— 实测出现过
-    /// 「连续 5 秒 downloaded 不动，然后一次跳 256KB」，那一刻窗口里只剩一两个
-    /// 间隔几十毫秒的样本，算出 `256KB / 0.05s ≈ 5.2 MB/s`，而真实速率只有
-    /// 约 65 KB/s。加上 `samples.len() < 2` 直接返回 0 的分支，界面上就表现为
-    /// 速度在 0 / 285KB/s / 5.2MB/s 之间乱跳。
+    /// 现在取「最早快照到现在」的累计字节增量除以同一段时间，不会被单个分片的
+    /// 落盘瞬间放大。
     ///
-    /// 改为固定分母后，「窗口内传了多少字节」除以「窗口有多长」，正是该窗口的
-    /// 平均速率，不会被单个分片的落盘瞬间放大。
+    /// 右端点取 `Instant::now()` 而非最后一个快照，是有意为之：这样 `speed()`
+    /// 是一个自洽的纯函数，不依赖外部刷新循环存活。CDN 停滞检测
+    /// （`ChunkScheduler::get_valid_task_speed_values`）是直接调用它的，
+    /// 若右端点取最后一个快照，刷新循环一旦停摆，停滞检测读到的就是一个
+    /// 永远不变的旧值 —— 那正是要修的毛病本身。
+    ///
+    /// 两层保险：有刷新循环时窗口会被推进、速度干净地衰减到 0；没有刷新循环时
+    /// 分母仍随 `now` 增长，速度持续下降而不会僵住。
     pub fn speed(&self) -> u64 {
-        let Some(started) = self.started_at else {
+        self.speed_at(Instant::now())
+    }
+
+    fn speed_at(&self, now: Instant) -> u64 {
+        let Some((first_time, first_bytes)) = self.samples.front() else {
             return 0;
         };
-        let now = Instant::now();
 
-        // 只统计**仍在窗口内**的样本。
-        //
-        // 不能直接 sum 全部：`cleanup_old_samples` 只在 `add_sample` 里调用，
-        // 下载停下来之后没有新样本进来，过期样本永远不会被淘汰 —— 速度就会
-        // 一直停在最后那个值不动（实测见过卡在 5.33 MB/s 好几秒）。
-        let total_bytes: u64 = self
-            .samples
-            .iter()
-            .filter(|(ts, _)| now.duration_since(*ts) <= self.window_size)
-            .map(|(_, bytes)| bytes)
-            .sum();
-        if total_bytes == 0 {
+        let duration = now.duration_since(*first_time);
+        if duration < MIN_MEASUREMENT_DURATION {
+            return 0;
+        }
+
+        let bytes = self.total_bytes.saturating_sub(*first_bytes);
+        if bytes == 0 {
             // 窗口内一个字节都没有 = 确实停了
             return 0;
         }
 
-        // 起步阶段（运行时长还不足一个窗口）用已运行时长，否则用窗口长度。
-        // 再兜一个下限，避免最开始几十毫秒内把一个分片算成天文数字。
-        let elapsed = now.duration_since(started).as_secs_f64();
-        let denom = elapsed
-            .min(self.window_size.as_secs_f64())
-            .max(MIN_SPEED_DENOM_SECS);
-
-        (total_bytes as f64 / denom) as u64
+        (bytes as f64 / duration.as_secs_f64()) as u64
     }
 
     /// 获取累计下载字节数
@@ -113,12 +146,12 @@ impl SpeedCalculator {
     }
 
     /// 重置计算器
+    ///
+    /// 复用同一个计算器跑下一轮（暂停后恢复、重试）时必须调用：残留的旧快照会把
+    /// 分母拉到「上一轮开始的时刻」，恢复后的速度会被稀释到接近 0。
     pub fn reset(&mut self) {
         self.samples.clear();
         self.total_bytes = 0;
-        // 必须一并清掉：否则复用这个计算器时「已运行时长」还是上一轮的，
-        // 起步阶段会直接用满窗口做分母，把刚开始的一点点字节算成很低的速度。
-        self.started_at = None;
     }
 }
 
@@ -161,7 +194,6 @@ pub fn format_eta(seconds: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
 
     #[test]
     fn test_speed_calculator_creation() {
@@ -181,61 +213,159 @@ mod tests {
         assert_eq!(calc.total_bytes(), 3072);
     }
 
-    /// 短时间内落盘一大块**不能**被算成天文速度。
+    #[test]
+    fn test_speed_calculation() {
+        let mut calc = SpeedCalculator::new(5);
+        let start = Instant::now();
+
+        calc.refresh_at(start);
+        calc.add_sample_at(1024 * 1024, start + Duration::from_millis(500));
+        calc.add_sample_at(1024 * 1024, start + Duration::from_secs(1));
+
+        assert_eq!(calc.speed_at(start + Duration::from_secs(1)), 2 * 1024 * 1024);
+    }
+
+    /// 跨度不足一个测量周期时报 0，不外推。
+    #[test]
+    fn test_speed_requires_warmup() {
+        let mut calc = SpeedCalculator::new(10);
+        let start = Instant::now();
+
+        calc.refresh_at(start);
+        calc.add_sample_at(1024 * 1024, start + Duration::from_millis(500));
+
+        assert_eq!(calc.speed_at(start + Duration::from_millis(500)), 0);
+    }
+
+    /// 停滞后由定时刷新把空闲时间灌进窗口，速度衰减到 0。
+    #[test]
+    fn test_idle_time_reduces_speed_to_zero() {
+        let mut calc = SpeedCalculator::new(10);
+        let start = Instant::now();
+
+        calc.refresh_at(start);
+        for second in 1..=10 {
+            calc.add_sample_at(1024 * 1024, start + Duration::from_secs(second));
+        }
+        assert_eq!(calc.speed_at(start + Duration::from_secs(10)), 1024 * 1024);
+
+        for second in 11..=21 {
+            calc.refresh_at(start + Duration::from_secs(second));
+        }
+        assert_eq!(calc.speed_at(start + Duration::from_secs(21)), 0);
+    }
+
+    /// 即使没有刷新循环，速度也必须随时间下降而不是僵住。
     ///
-    /// 这是实测踩到的坑：下载按分片落盘，`progress_callback` 并非匀速调用 ——
-    /// 出现过「连续 5 秒 downloaded 不动，然后一次跳 256KB」，旧实现用
-    /// 「最早样本到现在」当分母，算出 `256KB / 0.05s ≈ 5.2 MB/s`，
-    /// 而真实速率只有约 65 KB/s。
+    /// 这是 `speed()` 右端点取 `now` 而非最后一个快照的意义：CDN 停滞检测直接调
+    /// `speed()`，不经过刷新循环，右端点若取快照就会永远读到同一个旧值。
+    #[test]
+    fn test_speed_decays_without_refresh() {
+        let mut calc = SpeedCalculator::new(10);
+        let start = Instant::now();
+
+        calc.refresh_at(start);
+        for second in 1..=5 {
+            calc.add_sample_at(1024 * 1024, start + Duration::from_secs(second));
+        }
+        let at_5s = calc.speed_at(start + Duration::from_secs(5));
+        assert_eq!(at_5s, 1024 * 1024);
+
+        // 此后不再有任何 add_sample / refresh —— 模拟刷新循环停摆
+        let at_20s = calc.speed_at(start + Duration::from_secs(20));
+        assert!(
+            at_20s < at_5s / 3,
+            "无刷新时速度应随时间下降，5s 时 {} B/s，20s 时仍有 {} B/s",
+            at_5s,
+            at_20s
+        );
+    }
+
+    /// 窗口内的快照数量有上界，不会无限增长。
+    #[test]
+    fn test_snapshot_count_is_bounded() {
+        let mut calc = SpeedCalculator::new(10);
+        let start = Instant::now();
+
+        for step in 0..=120 {
+            calc.add_sample_at(1024, start + Duration::from_millis(step * 500));
+        }
+
+        assert!(calc.samples.len() <= 22);
+    }
+
+    /// 回归（实测踩到的坑）：短时间内落盘一大块**不能**被算成天文速度。
     ///
-    /// 注：本测试的前身断言的恰恰是旧行为（2MB/0.1s 要 >10MB/s），
-    /// 那是把瞬时写盘爆发当成了下载速率。
+    /// 下载按分片落盘，`progress_callback` 并非匀速调用 —— 出现过「连续 5 秒
+    /// downloaded 不动，然后一次跳 256KB」。最初的实现用「最早样本到现在」当分母，
+    /// 那一刻算出 `256KB / 0.05s ≈ 5.2 MB/s`，而真实速率只有约 65 KB/s。
     #[test]
     fn test_burst_write_is_not_reported_as_huge_speed() {
-        let mut calc = SpeedCalculator::new(5);
+        let mut calc = SpeedCalculator::new(10);
+        let start = Instant::now();
 
-        calc.add_sample(1024 * 1024); // 1MB
-        thread::sleep(Duration::from_millis(100));
-        calc.add_sample(1024 * 1024); // 1MB
+        // 前 5 秒一个字节都没来，只有定时刷新在打快照
+        for step in 0..=10 {
+            calc.refresh_at(start + Duration::from_millis(step * 500));
+        }
+        // 第 5 秒一次性落盘 256KB，随后的定时刷新把它记进快照
+        calc.add_sample_at(256 * 1024, start + Duration::from_secs(5));
+        let speed = calc.refresh_at(start + Duration::from_millis(5500));
 
-        let speed = calc.speed();
-        // 分母有 1 秒下限：2MB / 1s = 2MB/s，绝不该是 20MB/s
-        assert!(
-            speed <= 2 * 1024 * 1024,
-            "0.1 秒内落盘 2MB 不应被算成 {} B/s（分母塌缩）",
-            speed
-        );
         assert!(speed > 0, "有字节进来就该有速度");
-    }
-
-    /// 窗口内的平均速率：分母是窗口长度，不随样本疏密漂移。
-    #[test]
-    fn test_speed_uses_window_as_denominator() {
-        // 窗口 1 秒，方便测试
-        let mut calc = SpeedCalculator::new(1);
-        calc.add_sample(100_000);
-        // 跑满一个窗口后，分母应为窗口长度而非「到现在的时长」
-        thread::sleep(Duration::from_millis(1100));
-        calc.add_sample(100_000);
-
-        let speed = calc.speed();
-        // 第一个样本已被窗口淘汰，窗口内只剩 100_000 字节；
-        // 分母取 max(窗口 1s, 下限 1s) = 1s → 约 100 KB/s
         assert!(
-            (50_000..=150_000).contains(&speed),
-            "窗口平均速率应在 100KB/s 量级，实际 {}",
+            speed < 100 * 1024,
+            "5.5 秒里只传了 256KB（约 47KB/s）不应被算成 {} B/s（分母塌缩）",
             speed
         );
     }
 
-    /// 窗口内没有任何字节 = 确实停了，速度为 0（而不是沿用旧值）。
+    /// 回归：同样的传输量，样本疏密不同也应算出同一个速度。
+    ///
+    /// 分子分母都取自同一段时间，所以「每 500ms 来一点」和「攒 5 秒来一大块」
+    /// 必须一致 —— 分母塌缩的根因就是这两者会算出天差地别的值。
     #[test]
-    fn test_speed_zero_when_window_empty() {
-        let mut calc = SpeedCalculator::new(1);
-        calc.add_sample(500_000);
-        thread::sleep(Duration::from_millis(1200));
-        // 不再有新样本，窗口内已被清空
-        assert_eq!(calc.speed(), 0);
+    fn test_speed_is_insensitive_to_sample_density() {
+        let start = Instant::now();
+        let at_10s = start + Duration::from_secs(10);
+
+        // 密集：每 500ms 来 100KB，10 秒共 2MB
+        let mut dense = SpeedCalculator::new(10);
+        dense.refresh_at(start);
+        for step in 1..=20 {
+            dense.add_sample_at(100_000, start + Duration::from_millis(step * 500));
+        }
+
+        // 稀疏：只在第 5 秒和第 10 秒各来 1MB，10 秒同样共 2MB
+        let mut sparse = SpeedCalculator::new(10);
+        sparse.refresh_at(start);
+        sparse.add_sample_at(1_000_000, start + Duration::from_secs(5));
+        sparse.add_sample_at(1_000_000, start + Duration::from_secs(10));
+
+        assert_eq!(dense.speed_at(at_10s), 200_000);
+        assert_eq!(sparse.speed_at(at_10s), dense.speed_at(at_10s));
+    }
+
+    /// 回归：复用计算器时必须 reset，否则上一轮的快照会把分母拉长、速度稀释成 0。
+    #[test]
+    fn test_reset_clears_stale_baseline() {
+        let mut calc = SpeedCalculator::new(10);
+        let start = Instant::now();
+
+        // 第一轮：跑了一会儿
+        calc.refresh_at(start);
+        for second in 1..=5 {
+            calc.add_sample_at(1024 * 1024, start + Duration::from_secs(second));
+        }
+
+        // 暂停 5 分钟后恢复，复用同一个计算器
+        let resumed = start + Duration::from_secs(305);
+        calc.reset();
+        calc.refresh_at(resumed);
+        calc.add_sample_at(1024 * 1024, resumed + Duration::from_secs(1));
+
+        // 分母应为恢复后的 1 秒，而不是「从 5 分钟前算起」
+        assert_eq!(calc.speed_at(resumed + Duration::from_secs(1)), 1024 * 1024);
     }
 
     #[test]

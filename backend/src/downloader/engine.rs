@@ -1953,8 +1953,34 @@ impl DownloadEngine {
             });
         }
 
+        // 🔥 独立下载模式不经过 ChunkScheduler，没有它的速度刷新循环兜底，
+        //    这里自带一个：否则网络停滞时 task.speed 会冻在最后一个值不动。
+        let speed_refresh_handle = {
+            let task = task.clone();
+            let speed_calc = speed_calc.clone();
+            let cancellation_token = cancellation_token.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_millis(500));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        _ = cancellation_token.cancelled() => break,
+                        _ = interval.tick() => {
+                            let mut t = task.lock().await;
+                            if t.status != crate::downloader::TaskStatus::Downloading {
+                                t.speed = 0;
+                                continue;
+                            }
+                            // 与下载回调保持一致的加锁顺序：task -> speed_calc
+                            t.speed = speed_calc.lock().await.refresh();
+                        }
+                    }
+                }
+            })
+        };
+
         // 10. 并发下载分片（使用全局 Semaphore 和复用的 download_client，使用 URL 健康管理器）
-        self.download_chunks(
+        let download_result = self.download_chunks(
             task.clone(),
             chunk_manager.clone(),
             speed_calc.clone(),
@@ -1967,8 +1993,10 @@ impl DownloadEngine {
             referer.as_deref(), // 传递 Referer 头（如果存在）
             cancellation_token, // 传递取消令牌
         )
-            .await
-            .context("下载分片失败")?;
+            .await;
+        // 无论成功失败都要停掉刷新协程，避免它挂在已结束的任务上空转
+        speed_refresh_handle.abort();
+        download_result.context("下载分片失败")?;
 
         // 11. 校验临时文件大小
         self.verify_file_size(&temp_path, total_size)
