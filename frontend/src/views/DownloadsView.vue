@@ -1433,6 +1433,9 @@ function handleDownloadEvent(event: DownloadEvent) {
       // 状态变更
       if (index !== -1) {
         downloadItems.value[index].status = event.new_status as TaskStatus
+        if (event.new_status !== 'downloading') {
+          downloadItems.value[index].speed = 0
+        }
         // 🔥 退回等待队列时（pending + 携带 error），暴露退回原因便于排查
         if (event.new_status === 'pending' && event.error) {
           downloadItems.value[index].error = event.error
@@ -1626,6 +1629,10 @@ function handleFolderEvent(event: FolderEvent) {
     case 'progress':
       // 更新进度
       if (index !== -1) {
+        const currentStatus = downloadItems.value[index].status
+        if (currentStatus && ['paused', 'completed', 'failed', 'cancelled'].includes(currentStatus)) {
+          break
+        }
         downloadItems.value[index].downloaded_size = event.downloaded_size
         downloadItems.value[index].total_size = event.total_size
         // 🔥 只允许递增，防止延迟到达的旧 progress 回写子任务完成时的乐观 +1
@@ -1650,6 +1657,9 @@ function handleFolderEvent(event: FolderEvent) {
     case 'status_changed':
       if (index !== -1) {
         downloadItems.value[index].status = event.new_status as FolderStatus
+        if (event.new_status !== 'downloading') {
+          downloadItems.value[index].speed = 0
+        }
         mainListWsTime.set(folderId, Date.now())
       }
       break
