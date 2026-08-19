@@ -18,13 +18,14 @@
       <!-- 面包屑导航 -->
       <div class="breadcrumb-nav">
         <el-breadcrumb separator="/">
-          <el-breadcrumb-item @click="navigateTo('/')">
+          <el-breadcrumb-item :class="{ 'is-last': pathParts.length === 0 }" @click="navigateTo('/')">
             <el-icon><HomeFilled /></el-icon>
             根目录
           </el-breadcrumb-item>
           <el-breadcrumb-item
             v-for="(part, index) in pathParts"
-            :key="index"
+            :key="getPathUpTo(index)"
+            :class="{ 'is-last': index === pathParts.length - 1 }"
             @click="navigateTo(getPathUpTo(index))"
           >
             {{ part }}
@@ -351,6 +352,15 @@ watch(() => props.modelValue, (newVal) => {
     &:hover {
       color: var(--el-color-primary);
     }
+  }
+
+  // 不依赖 :last-child 结构伪类控制分隔符，避免层级增删后 "/" 残留 display:none
+  :deep(.el-breadcrumb__item:not(.is-last) .el-breadcrumb__separator) {
+    display: inline-block;
+  }
+
+  :deep(.el-breadcrumb__item.is-last .el-breadcrumb__separator) {
+    display: none;
   }
 }
 
