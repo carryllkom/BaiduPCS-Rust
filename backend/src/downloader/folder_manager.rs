@@ -2931,6 +2931,17 @@ impl FolderDownloadManager {
         folders.values().cloned().collect()
     }
 
+    /// 只读遍历内存中的全部文件夹下载
+    ///
+    /// 与 `get_all_folders` 不同，不克隆 `FolderDownload`（其 `pending_files`
+    /// 可能有上万条），供菜单进度摘要这类高频轮询使用。
+    pub async fn visit_folders<F: FnMut(&FolderDownload)>(&self, mut f: F) {
+        let folders = self.folders.read().await;
+        for folder in folders.values() {
+            f(folder);
+        }
+    }
+
     /// 🔥 获取归属指定 `backup_config_id`（如 `share-sync:{订阅id}`）的内存文件夹下载
     ///
     /// 供分享同步收集 tree 模式整目录下载产生的文件夹子任务进度。
