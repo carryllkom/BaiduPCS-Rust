@@ -220,6 +220,28 @@ export interface FileOperationResultItem {
 }
 
 /**
+ * 目标已存在同名项时的处理策略（与后端 `OnDup` 一致）
+ *
+ * - `newcopy`：保留两者，新的一份由百度自动改名为 `x(1).txt` / `dir(1)`
+ * - `overwrite`：覆盖；同名**文件夹会被整个替换而不是合并**
+ *
+ * 「跳过」无需传参：默认提交时冲突项本就保持不动，不再重提即可。
+ */
+export type OnDup = 'fail' | 'newcopy' | 'overwrite'
+
+/** 百度逐项错误码：目标已存在同名项 */
+export const FILE_EXISTS_ERROR_CODE = -8
+
+/** 失败任务中的单项失败明细（未列出的项已成功处理） */
+export interface FileOperationFailedItem {
+  from: string
+  to: string
+  /** -8 = 目标已存在同名项 */
+  error_code: number
+  isdir: boolean
+}
+
+/**
  * 风控验证组件信息（与后端 `AuthWidget` 字段一致；全部字段均可缺失）
  *
  * 字段对齐 Rust 端 `Option<String>`：未返回时为 `null` 或 `undefined`。
@@ -255,6 +277,8 @@ export type FileOperationOutcomeDto =
   verify_scene?: number | null
   /** 60 次轮询仍未完成（仅 taskquery 阶段使用） */
   still_running: boolean
+  /** 逐项失败明细；旧版后端无此字段 */
+  failed_items?: FileOperationFailedItem[]
 }
 
 /**
@@ -262,16 +286,19 @@ export type FileOperationOutcomeDto =
  *
  * 路径必须以 `/` 开头；`newname` 由前端先经 `validateFilename` 校验。
  * 返回值的 `kind` 字段用于区分业务成功/失败；网络层错误才会 reject。
+ *
+ * 不传 `ondup` 时百度按项独立处理：同名项保持不动并在 `failed_items` 中以
+ * `error_code=-8` 列出，其余照常完成。
  */
-export async function copyFiles(items: FileOperationItem[]): Promise<FileOperationOutcomeDto> {
-  return longPollClient.post('/files/copy', { items })
+export async function copyFiles(items: FileOperationItem[], ondup?: OnDup): Promise<FileOperationOutcomeDto> {
+  return longPollClient.post('/files/copy', ondup ? { items, ondup } : { items })
 }
 
 /**
- * 批量移动文件
+ * 批量移动文件（`ondup` 语义同 `copyFiles`）
  */
-export async function moveFiles(items: FileOperationItem[]): Promise<FileOperationOutcomeDto> {
-  return longPollClient.post('/files/move', { items })
+export async function moveFiles(items: FileOperationItem[], ondup?: OnDup): Promise<FileOperationOutcomeDto> {
+  return longPollClient.post('/files/move', ondup ? { items, ondup } : { items })
 }
 
 /**

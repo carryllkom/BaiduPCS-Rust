@@ -697,8 +697,8 @@ pub async fn create_folder(
 // =====================================================
 
 use crate::netdisk::{
-    AuthWidget, FileOperationErrorPayload, FileOperationItem, FileOperationOutcome,
-    FileOperationResultItem, RenameItem,
+    AuthWidget, FileOperationErrorPayload, FileOperationFailedItem, FileOperationItem,
+    FileOperationOutcome, FileOperationResultItem, OnDup, RenameItem,
 };
 
 /// `copy` / `move` 接口的请求体
@@ -707,14 +707,21 @@ use crate::netdisk::{
 /// - `path` 必须以 `/` 开头且非根（拒绝整盘移动）
 /// - `dest` 必须以 `/` 开头（无尾斜杠由 helper 归一化）
 /// - `newname` 经过 `validate_filename` 校验（含 Windows 保留名 / 控制字符 / UTF-16 长度 / 非法字符）
+///
+/// `ondup`：目标已存在同名项时的处理策略（fail / newcopy / overwrite），缺省沿用百度默认：
+/// 冲突项保留不动、其余照常完成，结果中逐项列出冲突。
 #[derive(Debug, Deserialize)]
 pub struct CopyFilesRequest {
     pub items: Vec<FileOperationItem>,
+    #[serde(default)]
+    pub ondup: Option<OnDup>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct MoveFilesRequest {
     pub items: Vec<FileOperationItem>,
+    #[serde(default)]
+    pub ondup: Option<OnDup>,
 }
 
 /// `rename` 接口的请求体（单条）
@@ -747,6 +754,8 @@ pub enum FileOperationOutcomeDto {
         #[serde(skip_serializing_if = "Option::is_none")]
         verify_scene: Option<i32>,
         still_running: bool,
+        /// 逐项失败明细（error_code=-8 为同名冲突）；未列出的项已成功
+        failed_items: Vec<FileOperationFailedItem>,
     },
 }
 
@@ -766,6 +775,7 @@ impl From<FileOperationOutcome> for FileOperationOutcomeDto {
                 authwidget: payload.authwidget,
                 verify_scene: payload.verify_scene,
                 still_running: payload.still_running,
+                failed_items: payload.failed_items,
             },
         }
     }
@@ -936,7 +946,11 @@ pub async fn copy_files(
     State(state): State<AppState>,
     Json(request): Json<CopyFilesRequest>,
 ) -> Result<Json<ApiResponse<FileOperationOutcomeDto>>, StatusCode> {
-    info!("API: 复制文件 items.len={}", request.items.len());
+    info!(
+        "API: 复制文件 items.len={} ondup={:?}",
+        request.items.len(),
+        request.ondup
+    );
     if request.items.is_empty() {
         return Ok(Json(ApiResponse::error(400, "items 不能为空".to_string())));
     }
@@ -969,7 +983,7 @@ pub async fn copy_files(
         }
     };
 
-    let outcome = match client.copy_files(&normalized).await {
+    let outcome = match client.copy_files(&normalized, request.ondup).await {
         Ok(o) => o,
         Err(e) => {
             error!("复制文件请求失败: {}", e);
@@ -987,7 +1001,7 @@ pub async fn copy_files(
             match state.trigger_warmup().await {
                 Ok(true) => {
                     match state.active_client().await {
-                        Some(c2) => match c2.copy_files(&normalized).await {
+                        Some(c2) => match c2.copy_files(&normalized, request.ondup).await {
                             Ok(o2) => o2,
                             Err(retry_err) => {
                                 error!("warmup 重试后仍失败: {}", retry_err);
@@ -1024,7 +1038,11 @@ pub async fn move_files(
     State(state): State<AppState>,
     Json(request): Json<MoveFilesRequest>,
 ) -> Result<Json<ApiResponse<FileOperationOutcomeDto>>, StatusCode> {
-    info!("API: 移动文件 items.len={}", request.items.len());
+    info!(
+        "API: 移动文件 items.len={} ondup={:?}",
+        request.items.len(),
+        request.ondup
+    );
     if request.items.is_empty() {
         return Ok(Json(ApiResponse::error(400, "items 不能为空".to_string())));
     }
@@ -1060,7 +1078,7 @@ pub async fn move_files(
         }
     };
 
-    let outcome = match client.move_files(&normalized).await {
+    let outcome = match client.move_files(&normalized, request.ondup).await {
         Ok(o) => o,
         Err(e) => {
             error!("移动文件请求失败: {}", e);
@@ -1077,7 +1095,7 @@ pub async fn move_files(
             match state.trigger_warmup().await {
                 Ok(true) => {
                     match state.active_client().await {
-                        Some(c2) => match c2.move_files(&normalized).await {
+                        Some(c2) => match c2.move_files(&normalized, request.ondup).await {
                             Ok(o2) => o2,
                             Err(retry_err) => {
                                 error!("warmup 重试后仍失败: {}", retry_err);

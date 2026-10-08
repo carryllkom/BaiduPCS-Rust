@@ -936,6 +936,44 @@ pub struct FileOperationItem {
     pub newname: String,
 }
 
+/// `filemanager` 接口 copy/move 时目标已存在同名项的处理策略（百度 `ondup` 参数）
+///
+/// 实测（web 版 `api/filemanager`，async=2）：
+/// - `ondup` 必须写在 `filelist` 的**每一项**里；放在表单或 URL 上时 `overwrite` 不生效
+/// - 默认（`fail`）按项独立处理：不冲突的照常完成，冲突项原样保留，任务以
+///   `task_errno=-30` 失败，`list` 中逐项给出 `error_code=-8`
+/// - `newcopy`：新的一份自动改名为 `x(1).txt` / `dir(1)`
+/// - `overwrite`：同名文件被替换；同名**文件夹被整个替换而不是合并**
+/// - `skip` 不被识别，表现与 `fail` 相同，故不提供（「跳过」= 默认提交后不再处理冲突项）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnDup {
+    /// 报错（百度默认行为）
+    Fail,
+    /// 保留两者：百度自动给新的一份改名
+    Newcopy,
+    /// 覆盖目标
+    Overwrite,
+}
+
+impl OnDup {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OnDup::Fail => "fail",
+            OnDup::Newcopy => "newcopy",
+            OnDup::Overwrite => "overwrite",
+        }
+    }
+}
+
+/// 发送给百度的 copy/move filelist 单项：`FileOperationItem` + 逐项 `ondup`
+#[derive(Debug, Serialize)]
+pub struct FileOperationItemWithOnDup<'a> {
+    #[serde(flatten)]
+    pub item: &'a FileOperationItem,
+    pub ondup: OnDup,
+}
+
 /// `filemanager` 接口 `opera=rename` 时 `filelist` JSON 数组中的单条 item
 ///
 /// 百度协议形如：`[{"path":"/a/x.mp4","newname":"y.mp4","id":123456789}]`
@@ -960,6 +998,61 @@ pub struct FileOperationResultItem {
     /// 目标路径
     #[serde(default)]
     pub to: String,
+}
+
+/// `share/taskquery` 返回 `list` 中的原始单项
+///
+/// 成功时只有 `from` / `to`；失败时额外带 `error_code`（-8 = 目标已存在同名项）
+/// 与 `from_meta` / `to_meta`。
+#[derive(Debug, Clone, Deserialize)]
+pub struct FileManagerTaskListEntry {
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub to: String,
+    #[serde(default)]
+    pub error_code: i32,
+    #[serde(default)]
+    pub from_meta: Option<FileManagerTaskEntryMeta>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FileManagerTaskEntryMeta {
+    #[serde(default, deserialize_with = "deserialize_u64_flexible")]
+    pub isdir: u64,
+}
+
+/// 失败任务中的单项失败明细
+#[derive(Debug, Clone, Serialize)]
+pub struct FileOperationFailedItem {
+    /// 源路径
+    pub from: String,
+    /// 目标路径
+    pub to: String,
+    /// 百度逐项错误码（-8 = 目标已存在同名项）
+    pub error_code: i32,
+    /// 源是否为文件夹
+    pub isdir: bool,
+}
+
+impl From<FileManagerTaskListEntry> for FileOperationResultItem {
+    fn from(e: FileManagerTaskListEntry) -> Self {
+        Self {
+            from: e.from,
+            to: e.to,
+        }
+    }
+}
+
+impl From<FileManagerTaskListEntry> for FileOperationFailedItem {
+    fn from(e: FileManagerTaskListEntry) -> Self {
+        Self {
+            isdir: e.from_meta.map(|m| m.isdir == 1).unwrap_or(false),
+            from: e.from,
+            to: e.to,
+            error_code: e.error_code,
+        }
+    }
 }
 
 /// `filemanager` 接口同步返回（POST 后立即得到）的响应体
@@ -1003,9 +1096,9 @@ pub struct FileManagerTaskQueryResponse {
     /// 0..100，仅 running 时有意义；百度此字段在不同版本可能为 number 或 string，故用 Value 接住
     #[serde(default)]
     pub progress: serde_json::Value,
-    /// 完成时返回 from/to 列表
+    /// 完成时为 from/to 列表；失败时为逐项失败明细（带 error_code）
     #[serde(default)]
-    pub list: Vec<FileOperationResultItem>,
+    pub list: Vec<FileManagerTaskListEntry>,
     /// 完成项总数
     #[serde(default)]
     pub total: u32,
@@ -1058,6 +1151,9 @@ pub struct FileOperationErrorPayload {
     /// 60 次轮询仍未完成（仅 taskquery 阶段使用）
     #[serde(default)]
     pub still_running: bool,
+    /// taskquery `status="failed"` 时的逐项失败明细；未列出的项已成功处理
+    #[serde(default)]
+    pub failed_items: Vec<FileOperationFailedItem>,
 }
 
 /// 文件管理操作的统一内部 enum
