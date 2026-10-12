@@ -31,6 +31,9 @@ pub struct FileListQuery {
     /// 是否降序（true=降序）
     #[serde(default)]
     pub desc: bool,
+    /// 指定账号（跨账号复制 / 移动时浏览目标账号目录）；缺省为活跃账号
+    #[serde(default)]
+    pub uid: Option<u64>,
 }
 
 /// errno=-6（身份校验失败）在预热重试后仍未恢复时，给用户的可操作提示。
@@ -97,10 +100,14 @@ pub async fn get_file_list(
     State(state): State<AppState>,
     Query(params): Query<FileListQuery>,
 ) -> Result<Json<ApiResponse<FileListData>>, StatusCode> {
-    info!("API: 获取文件列表 dir={}, page={}", params.dir, params.page);
+    info!(
+        "API: 获取文件列表 dir={}, page={}, uid={:?}",
+        params.dir, params.page, params.uid
+    );
 
-    // 多账号路由：按 active_uid 取客户端（运行时单一真源）
-    let client = match state.active_client().await {
+    // 多账号路由：显式 uid 优先，否则按 active_uid 取客户端（运行时单一真源）
+    let target_uid = params.uid.map(crate::auth::Uid::new);
+    let client = match state.client_for_or_active(target_uid).await {
         Some(c) => c,
         None => {
             return Ok(Json(ApiResponse::error(
@@ -125,9 +132,9 @@ pub async fn get_file_list(
     if let Err(e) = &result {
         if e.to_string().contains("API error -6") {
             warn!("获取文件列表遇到 errno=-6，触发预热重试...");
-            match state.trigger_warmup().await {
+            match state.warmup_for_or_active(target_uid).await {
                 Ok(true) => {
-                    if let Some(c) = state.active_client().await {
+                    if let Some(c) = state.client_for_or_active(target_uid).await {
                         result = c
                             .get_file_list_ordered(
                                 &params.dir,
@@ -588,6 +595,9 @@ pub async fn delete_files(
 pub struct CreateFolderRequest {
     /// 文件夹路径（必须以 / 开头）
     pub path: String,
+    /// 指定账号（跨账号复制 / 移动时在目标账号建目录）；缺省为活跃账号
+    #[serde(default)]
+    pub uid: Option<u64>,
 }
 
 /// 创建文件夹响应数据
@@ -619,8 +629,9 @@ pub async fn create_folder(
         )));
     }
 
-    // 多账号路由：按 active_uid 取客户端
-    let client = match state.active_client().await {
+    // 多账号路由：显式 uid 优先，否则按 active_uid 取客户端
+    let target_uid = request.uid.map(crate::auth::Uid::new);
+    let client = match state.client_for_or_active(target_uid).await {
         Some(c) => c,
         None => {
             return Ok(Json(ApiResponse::error(
@@ -649,11 +660,11 @@ pub async fn create_folder(
                 warn!("创建文件夹遇到 errno=-6，触发预热重试...");
 
                 // 触发预热
-                match state.trigger_warmup().await {
+                match state.warmup_for_or_active(target_uid).await {
                     Ok(true) => {
                         info!("预热成功，重试创建文件夹...");
-                        // 重新获取活跃账号客户端（预热后 cookies 已刷新）
-                        if let Some(c) = state.active_client().await {
+                        // 重新获取客户端（预热后 cookies 已刷新）
+                        if let Some(c) = state.client_for_or_active(target_uid).await {
                             match c.create_folder(&request.path).await {
                                 Ok(response) => {
                                     let data = CreateFolderData {

@@ -74,6 +74,10 @@
                 <el-icon><Rank /></el-icon>
                 移动到...
               </el-dropdown-item>
+              <el-dropdown-item v-if="authStore.hasMultipleAccounts" @click="handleBatchCrossAccount">
+                <el-icon><Switch /></el-icon>
+                复制/移动到其他账号...
+              </el-dropdown-item>
               <el-dropdown-item @click="handleBatchShare">
                 <el-icon><Link /></el-icon>
                 分享
@@ -171,6 +175,10 @@
               <el-dropdown-item @click="handleBatchMove">
                 <el-icon><Rank /></el-icon>
                 移动到...
+              </el-dropdown-item>
+              <el-dropdown-item v-if="authStore.hasMultipleAccounts" @click="handleBatchCrossAccount">
+                <el-icon><Switch /></el-icon>
+                复制/移动到其他账号...
               </el-dropdown-item>
               <el-dropdown-item divided @click="handleBatchDelete">
                 <el-icon><Delete /></el-icon>
@@ -458,6 +466,13 @@
         @resolve="handleConflictResolve"
     />
 
+    <!-- 跨账号复制 / 移动 -->
+    <CrossAccountTransferDialog
+        v-model="crossAccountVisible"
+        :files="crossAccountFiles"
+        @finished="handleCrossAccountFinished"
+    />
+
     <!-- 文件右键菜单 -->
     <FileContextMenu
         v-model="contextMenuVisible"
@@ -532,6 +547,9 @@ import {
 import NetdiskFolderPickerModal from '@/components/NetdiskFolderPickerModal.vue'
 import FileContextMenu, {type ContextMenuItem} from '@/components/FileContextMenu.vue'
 import FileConflictDialog, {type ConflictChoice, type ConflictEntry} from '@/components/FileConflictDialog.vue'
+import CrossAccountTransferDialog from '@/components/CrossAccountTransferDialog.vue'
+import type {CrossAccountJob} from '@/api/crossAccount'
+import {useAuthStore} from '@/stores/auth'
 import {
   CopyDocument as CopyDocumentIcon,
   Delete as DeleteIcon,
@@ -542,6 +560,7 @@ import {
   FolderOpened as FolderOpenedIcon,
   Link as LinkIcon,
   Rank as RankIcon,
+  Switch as SwitchIcon,
   Refresh as RefreshIcon,
   Upload as UploadIcon,
 } from '@element-plus/icons-vue'
@@ -620,6 +639,11 @@ const conflictOperation = ref<'copy' | 'move'>('copy')
 const conflictEntries = ref<ConflictEntry[]>([])
 const conflictDoneCount = ref(0)
 let conflictResolver: ((choice: ConflictChoice) => void) | null = null
+
+// 跨账号复制 / 移动
+const authStore = useAuthStore()
+const crossAccountVisible = ref(false)
+const crossAccountFiles = ref<FileItem[]>([])
 
 // 右键菜单
 const fileTableRef = ref<TableInstance>()
@@ -1714,6 +1738,37 @@ function openMovePicker(files: FileItem[]) {
   showFolderPicker.value = true
 }
 
+/** 触发批量跨账号复制 / 移动 */
+function handleBatchCrossAccount() {
+  if (selectedFiles.value.length === 0) {
+    ElMessage.warning('请先选择要复制或移动的文件或文件夹')
+    return
+  }
+  openCrossAccountDialog([...selectedFiles.value])
+}
+
+function openCrossAccountDialog(files: FileItem[]) {
+  const enc = findEncrypted(files)
+  if (enc) {
+    ElMessage.error(`加密文件/文件夹不支持跨账号复制/移动：${getDisplayName(enc)}`)
+    return
+  }
+  // 与后端一致：只支持同一目录下的选中项（避免父子重叠、跨目录同名）
+  if (new Set(files.map((f) => dirname(f.path))).size > 1) {
+    ElMessage.warning('跨账号复制/移动只支持同一目录下的文件，跨目录的搜索结果请分批操作')
+    return
+  }
+  crossAccountFiles.value = files
+  crossAccountVisible.value = true
+}
+
+/** 跨账号移动删掉了源文件：刷新当前列表 */
+function handleCrossAccountFinished(job: CrossAccountJob) {
+  if (job.source_deleted) {
+    refreshFileList()
+  }
+}
+
 /** 文件夹选择器确认 */
 async function handleFolderPicked(destPath: string) {
   await executeFileOperation(folderPickerOperation.value, destPath)
@@ -1934,6 +1989,15 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
         disabledReason: encryptedReason ?? '正在移动，请稍候',
       },
   )
+  if (authStore.hasMultipleAccounts) {
+    items.push({
+      key: 'cross-account',
+      label: '复制/移动到其他账号...',
+      icon: SwitchIcon,
+      disabled: !!encryptedReason,
+      disabledReason: encryptedReason,
+    })
+  }
   if (single) {
     items.push({
       key: 'rename',
@@ -2004,6 +2068,9 @@ function handleContextMenuSelect(key: string) {
     case 'move':
       openMovePicker(targets)
       break
+    case 'cross-account':
+      openCrossAccountDialog(targets)
+      break
     case 'rename':
       handleSingleRename(first)
       break
@@ -2029,7 +2096,7 @@ void joinPath
 
 <script lang="ts">
 // 图标导入
-export {Folder, Document, Refresh, HomeFilled, Upload, ArrowDown, FolderAdd, Download, Share, Loading, Link, Delete, Search, Close, CopyDocument, Rank, Edit, MoreFilled, Operation} from '@element-plus/icons-vue'
+export {Folder, Document, Refresh, HomeFilled, Upload, ArrowDown, FolderAdd, Download, Share, Loading, Link, Delete, Search, Close, CopyDocument, Rank, Switch, Edit, MoreFilled, Operation} from '@element-plus/icons-vue'
 </script>
 
 <style scoped lang="scss">

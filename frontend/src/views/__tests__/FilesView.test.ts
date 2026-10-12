@@ -11,6 +11,17 @@ vi.mock('@/utils/responsive', () => ({
   useIsMobile: () => ref(responsive.isMobile),
 }))
 
+// 默认单账号（不显示跨账号菜单）；跨账号用例临时切成多账号
+const auth = vi.hoisted(() => ({
+  hasMultipleAccounts: false,
+  activeUid: 1 as number | null,
+  accounts: [] as Array<{ uid: number; username: string; nickname: string | null }>,
+}))
+
+vi.mock('@/stores/auth', () => ({
+  useAuthStore: () => auth,
+}))
+
 vi.mock('@/api/file', () => ({
   getFileList: vi.fn().mockResolvedValue({
     list: [],
@@ -355,6 +366,97 @@ describe('FilesView 右键菜单', () => {
     expect(wrapper.vm.showShareDialog).toBe(true)
 
     wrapper.unmount()
+  })
+
+  describe('多账号', () => {
+    beforeEach(() => {
+      auth.hasMultipleAccounts = true
+      auth.accounts = [
+        { uid: 1, username: 'a', nickname: null },
+        { uid: 2, username: 'b', nickname: null },
+      ]
+    })
+    afterEach(() => {
+      auth.hasMultipleAccounts = false
+      auth.accounts = []
+    })
+
+    it('显示"复制/移动到其他账号..."，点击后以右键对象打开跨账号对话框', async () => {
+      const wrapper = mountFilesView()
+      await nextTick()
+
+      const file = makeFile()
+      // @ts-expect-error setup 内部方法
+      wrapper.vm.handleRowContextMenu(file, null, contextEvent())
+      await nextTick()
+      expect(menuLabels()).toEqual(['下载', '分享', '复制到...', '移动到...', '复制/移动到其他账号...', '重命名', '删除'])
+
+      clickMenuItem('复制/移动到其他账号...')
+      await nextTick()
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.crossAccountVisible).toBe(true)
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.crossAccountFiles.map((f: { path: string }) => f.path)).toEqual(['/docs/a.txt'])
+
+      wrapper.unmount()
+    })
+
+    it('加密文件的跨账号复制/移动置灰', async () => {
+      const wrapper = mountFilesView()
+      await nextTick()
+
+      const encrypted = makeFile({ is_encrypted: true, original_name: 'secret.txt' })
+      // @ts-expect-error setup 内部方法
+      wrapper.vm.handleRowContextMenu(encrypted, null, contextEvent())
+      await nextTick()
+
+      const disabled = menuItems().filter((el) => el.classList.contains('is-disabled')).map((el) => el.textContent?.trim())
+      expect(disabled).toEqual(['复制到...', '移动到...', '复制/移动到其他账号...', '重命名'])
+
+      wrapper.unmount()
+    })
+
+    it('跨目录（搜索结果）或父子重叠的选中项不打开跨账号对话框', async () => {
+      const wrapper = mountFilesView()
+      await nextTick()
+
+      const a = makeFile({ fs_id: 1, path: '/x/a.txt', server_filename: 'a.txt' })
+      const b = makeFile({ fs_id: 2, path: '/y/a.txt', server_filename: 'a.txt' })
+      // @ts-expect-error setup 内部方法
+      wrapper.vm.openCrossAccountDialog([a, b])
+      await nextTick()
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.crossAccountVisible).toBe(false)
+
+      const dir = makeFile({ fs_id: 3, path: '/d', server_filename: 'd', isdir: 1 })
+      const child = makeFile({ fs_id: 4, path: '/d/a.txt', server_filename: 'a.txt' })
+      // @ts-expect-error setup 内部方法
+      wrapper.vm.openCrossAccountDialog([dir, child])
+      await nextTick()
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.crossAccountVisible).toBe(false)
+
+      wrapper.unmount()
+    })
+
+    it('跨账号移动删除了源文件时刷新列表，仅复制时不刷新', async () => {
+      const wrapper = mountFilesView()
+      await nextTick()
+      const { getFileList } = await import('@/api/file')
+      const before = vi.mocked(getFileList).mock.calls.length
+
+      // @ts-expect-error setup 内部方法
+      wrapper.vm.handleCrossAccountFinished({ source_deleted: false })
+      await nextTick()
+      expect(vi.mocked(getFileList).mock.calls.length).toBe(before)
+
+      // @ts-expect-error setup 内部方法
+      wrapper.vm.handleCrossAccountFinished({ source_deleted: true })
+      await nextTick()
+      expect(vi.mocked(getFileList).mock.calls.length).toBeGreaterThan(before)
+
+      wrapper.unmount()
+    })
   })
 
   it('右键菜单"移动到..."以右键对象为源，并禁选源父目录与文件夹自身子树', async () => {

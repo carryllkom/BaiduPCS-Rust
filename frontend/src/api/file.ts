@@ -74,16 +74,18 @@ export type FileSortOrder = 'name' | 'time' | 'size'
  * 获取文件列表
  * @param order 排序字段：name/time/size（由百度接口原生支持）
  * @param desc 是否降序
+ * @param uid 指定账号（如跨账号复制时浏览目标账号）；缺省为活跃账号
  */
 export async function getFileList(
     dir: string = '/',
     page: number = 1,
     pageSize: number = 50,
     order: FileSortOrder = 'name',
-    desc: boolean = false
+    desc: boolean = false,
+    uid?: number | null
 ): Promise<FileListData> {
   const response = await apiClient.get<ApiResponse<FileListData>>('/files', {
-    params: { dir, page, page_size: pageSize, order, desc }
+    params: { dir, page, page_size: pageSize, order, desc, uid: uid ?? undefined }
   })
 
   if (response.data.code !== 0 || !response.data.data) {
@@ -110,10 +112,12 @@ export async function getDownloadUrl(fsId: number): Promise<string> {
 
 /**
  * 创建文件夹
+ * @param uid 指定账号；缺省为活跃账号
  */
-export async function createFolder(path: string): Promise<CreateFolderData> {
+export async function createFolder(path: string, uid?: number | null): Promise<CreateFolderData> {
   const response = await apiClient.post<ApiResponse<CreateFolderData>>('/files/folder', {
-    path
+    path,
+    uid: uid ?? undefined,
   })
 
   if (response.data.code !== 0 || !response.data.data) {
