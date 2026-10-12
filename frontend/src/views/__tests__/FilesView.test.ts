@@ -75,6 +75,8 @@ vi.mock('@/api/file', () => ({
   copyFiles: vi.fn(),
   moveFiles: vi.fn(),
   FILE_EXISTS_ERROR_CODE: -8,
+  isNotFoundError: vi.fn((e: unknown) => /API error -9\b/.test(String((e as Error)?.message ?? e))),
+  LOCATE_MAX_PAGES: 20,
 }))
 
 vi.mock('@/api/download', () => ({
@@ -730,14 +732,42 @@ describe('FilesView 目录记忆与定位', () => {
     wrapper.unmount()
   })
 
-  it('记忆的目录已不存在时回退到根目录', async () => {
+  it('记忆的目录已不存在时回退到最近的上级目录', async () => {
     const { getFileList } = await import('@/api/file')
-    vi.mocked(getFileList).mockRejectedValueOnce(new Error('目录不存在'))
-    uiPrefs.dirs.set(1, '/gone')
+    vi.mocked(getFileList)
+        .mockRejectedValueOnce(new Error('获取文件列表失败: API error -9: '))
+        .mockRejectedValueOnce(new Error('获取文件列表失败: API error -9: '))
+    uiPrefs.dirs.set(1, '/a/b/gone')
     const wrapper = mountFilesView()
     await flushPromises()
-    expect(await requestedDirs()).toEqual(['/gone', '/'])
-    expect(uiPrefs.dirs.get(1)).toBe('/')
+    expect(await requestedDirs()).toEqual(['/a/b/gone', '/a/b', '/a'])
+    expect(uiPrefs.dirs.get(1)).toBe('/a')
+    wrapper.unmount()
+  })
+
+  it('非「目录不存在」的错误不逐级上探，直接回到根目录', async () => {
+    const { getFileList } = await import('@/api/file')
+    vi.mocked(getFileList)
+        .mockRejectedValueOnce(new Error('获取文件列表失败: API error -9: '))
+        .mockRejectedValueOnce(new Error('网络错误'))
+    uiPrefs.dirs.set(1, '/a/b/gone')
+    const wrapper = mountFilesView()
+    await flushPromises()
+    expect(await requestedDirs()).toEqual(['/a/b/gone', '/a/b', '/'])
+    wrapper.unmount()
+  })
+
+  it('定位的上传目录已不存在：打开最近的上级目录', async () => {
+    const { getFileList } = await import('@/api/file')
+    vi.mocked(getFileList).mockRejectedValueOnce(new Error('获取文件列表失败: API error -9: '))
+    routeState.query = { path: '/测试2-1', highlight: '/测试2-1/dummy_1.txt' }
+    const wrapper = mountFilesView()
+    await flushPromises()
+    expect(await requestedDirs()).toEqual(['/测试2-1', '/'])
+    // @ts-expect-error setup 内部状态
+    expect(wrapper.vm.currentDir).toBe('/')
+    // @ts-expect-error setup 内部状态
+    expect(wrapper.vm.locatedPath).toBeNull()
     wrapper.unmount()
   })
 

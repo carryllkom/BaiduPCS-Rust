@@ -548,6 +548,8 @@ import {
   joinPath,
   basename,
   dirname,
+  isNotFoundError,
+  LOCATE_MAX_PAGES,
   FILE_EXISTS_ERROR_CODE,
   type FileItem,
   type FileOperationItem,
@@ -706,8 +708,6 @@ let fileRequestVersion = 0
 
 // 「定位到网盘」高亮的文件路径（从上传管理跳转过来时设置，切换目录后清除）
 const locatedPath = ref<string | null>(null)
-// 定位翻页查找目标文件的最大页数（每页 50 条）
-const LOCATE_MAX_PAGES = 20
 
 // 路径分割
 const pathParts = computed(() => {
@@ -729,10 +729,16 @@ function normalizeDirPath(p: string): string {
   return trimmed === '' ? '/' : trimmed
 }
 
-// 加载文件列表
-// 返回 false 仅表示本次（最新一次）请求失败；被更新请求取代或无需加载均返回 true
-async function loadFiles(dir: string, append: boolean = false): Promise<boolean> {
-  if (append && (loadingMore.value || !hasMore.value)) return true
+// 目录列表加载结果：not_found 为百度 errno -9（目录不存在）；被更新请求取代或无需加载均视为 ok
+type LoadResult = 'ok' | 'not_found' | 'error'
+
+// 加载文件列表；silent 时失败不弹错误提示，由调用方处理
+async function loadFiles(
+    dir: string,
+    append: boolean = false,
+    options: { silent?: boolean } = {},
+): Promise<LoadResult> {
+  if (append && (loadingMore.value || !hasMore.value)) return 'ok'
   const version = ++fileRequestVersion
   // 请求发起时的账号：记忆目录按账号区分
   const ownerUid = authStore.activeUid
@@ -755,12 +761,12 @@ async function loadFiles(dir: string, append: boolean = false): Promise<boolean>
 
   try {
     const data = await getFileList(dir, requestPage, 50, sortOrder.value, sortDesc.value)
-    if (version !== fileRequestVersion) return true
+    if (version !== fileRequestVersion) return 'ok'
 
     if (append) {
       // 防御：追加结果必须仍属于当前目录，避免旧目录的分页请求覆盖/污染已跳转的目录
       // 使用归一化比较，兼容潜在的尾斜杠等路径格式差异
-      if (normalizeDirPath(dir) !== normalizeDirPath(currentDir.value)) return true
+      if (normalizeDirPath(dir) !== normalizeDirPath(currentDir.value)) return 'ok'
       fileList.value = [...fileList.value, ...data.list]
     } else {
       fileList.value = data.list
@@ -770,14 +776,16 @@ async function loadFiles(dir: string, append: boolean = false): Promise<boolean>
 
     hasMore.value = data.has_more
     currentPage.value = data.page
-    return true
+    return 'ok'
   } catch (error: any) {
-    if (version !== fileRequestVersion) return true
+    if (version !== fileRequestVersion) return 'ok'
     // 失败时停止继续加载，避免滚动加载在出错后不断 page+1 重发造成死循环
     hasMore.value = false
-    ElMessage.error(error.message || '加载文件列表失败')
+    if (!options.silent) {
+      ElMessage.error(error.message || '加载文件列表失败')
+    }
     console.error('加载文件列表失败:', error)
-    return false
+    return isNotFoundError(error) ? 'not_found' : 'error'
   } finally {
     if (version === fileRequestVersion) {
       loading.value = false
@@ -1565,12 +1573,36 @@ function getInitialDir(): string {
   return uiPrefsStore.getLastNetdiskDir(authStore.activeUid) ?? '/'
 }
 
-// 加载起始目录；记忆的目录已被删除 / 移走时回退到根目录
+// 目录不存在时逐级向上，打开最近一个仍存在的上级目录；返回打开的目录，全部失败返回 null
+async function openNearestExistingDir(dir: string): Promise<string | null> {
+  let cur = normalizeDirPath(dir)
+  while (cur !== '/') {
+    cur = dirname(cur)
+    // 根目录失败时按常规弹出错误（此时多半是网络 / 登录问题）
+    const result = await loadFiles(cur, false, { silent: cur !== '/' })
+    if (result === 'ok') return cur
+    if (result === 'error') break
+  }
+  if (cur !== '/' && (await loadFiles('/')) === 'ok') return '/'
+  return null
+}
+
+function describeDir(dir: string): string {
+  return dir === '/' ? '根目录' : `「${dir}」`
+}
+
+// 加载起始目录；记忆的目录已被删除 / 移走时回退到最近的上级目录
 async function loadInitialDir() {
   const dir = getInitialDir()
-  const ok = await loadFiles(dir)
-  if (!ok && dir !== '/') {
-    await loadFiles('/')
+  const result = await loadFiles(dir, false, { silent: dir !== '/' })
+  if (result === 'ok' || dir === '/') return
+  const opened = await openNearestExistingDir(dir)
+  if (opened !== null) {
+    ElMessage.info(
+        result === 'not_found'
+            ? `上次浏览的目录「${dir}」已不存在，已打开${describeDir(opened)}`
+            : `无法打开上次浏览的目录「${dir}」，已打开${describeDir(opened)}`,
+    )
   }
 }
 
@@ -1579,9 +1611,17 @@ async function locateInNetdisk(dir: string, targetPath: string | null) {
   if (isSearchMode.value) {
     resetSearchState()
   }
-  const ok = await loadFiles(dir)
-  if (!ok) {
-    if (dir !== '/') await loadFiles('/')
+  const result = await loadFiles(dir, false, { silent: dir !== '/' })
+  if (result !== 'ok') {
+    if (dir === '/') return
+    const opened = await openNearestExistingDir(dir)
+    if (opened !== null) {
+      ElMessage.warning(
+          result === 'not_found'
+              ? `上传目录「${dir}」在网盘中不存在（可能已被移动、重命名或删除，或任务尚未开始上传），已打开${describeDir(opened)}`
+              : `无法打开上传目录「${dir}」，已打开${describeDir(opened)}`,
+      )
+    }
     return
   }
   // 加载期间用户已跳到别的目录 → 放弃定位
@@ -1590,8 +1630,8 @@ async function locateInNetdisk(dir: string, targetPath: string | null) {
 
   const findTarget = () => fileList.value.find(f => f.path === targetPath)
   for (let i = 0; i < LOCATE_MAX_PAGES && !findTarget() && hasMore.value; i++) {
-    const pageOk = await loadFiles(dir, true)
-    if (!pageOk || !stillHere()) return
+    const pageResult = await loadFiles(dir, true)
+    if (pageResult !== 'ok' || !stillHere()) return
   }
 
   if (!findTarget()) {
