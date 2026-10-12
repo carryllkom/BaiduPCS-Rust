@@ -587,13 +587,19 @@ pub struct ShareRecord {
     #[serde(rename = "typicalPath", default)]
     pub typical_path: String,
 
-    /// 过期类型（0=永久, 1=1天, 7=7天, 30=30天）
+    /// 过期状态（-1=已过期, 0=有期限且未过期, 1=永久有效）
+    ///
+    /// 注意：这不是有效天数，原始有效天数见 `oriExpiredType`
     #[serde(rename = "expiredType", default)]
     pub expired_type: i32,
 
-    /// 过期时间戳（0表示永久）
+    /// 剩余有效秒数（不是时间戳；永久或已过期时为 0）
     #[serde(rename = "expiredTime", default)]
     pub expired_time: i64,
+
+    /// 过期时间点（Unix 秒级时间戳；永久或已过期时为 0）
+    #[serde(rename = "lastExpireTime", default)]
+    pub last_expire_time: i64,
 
     /// 浏览次数
     #[serde(rename = "vCnt", default)]
@@ -606,9 +612,29 @@ impl ShareRecord {
         self.status == 0
     }
 
+    /// 是否已过期
+    pub fn is_expired(&self) -> bool {
+        self.expired_type == -1
+    }
+
     /// 是否永久有效
     pub fn is_permanent(&self) -> bool {
-        self.expired_type == 0 || self.expired_time == 0
+        !self.is_expired() && self.expire_at(0) == 0
+    }
+
+    /// 过期时间点（Unix 秒级时间戳），0 表示永久或已过期
+    ///
+    /// 优先使用 `lastExpireTime`；缺失时用 `now + 剩余秒数` 推算
+    pub fn expire_at(&self, now: i64) -> i64 {
+        if self.is_expired() {
+            0
+        } else if self.last_expire_time > 0 {
+            self.last_expire_time
+        } else if self.expired_time > 0 {
+            now + self.expired_time
+        } else {
+            0
+        }
     }
 
     /// 获取文件名（从路径中提取）
@@ -1168,4 +1194,43 @@ pub enum FileOperationOutcome {
         message: String,
         payload: FileOperationErrorPayload,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(json: &str) -> ShareRecord {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn share_record_expiry_uses_baidu_semantics() {
+        // 7 天有效期：expiredTime 是剩余秒数，lastExpireTime 才是过期时间点
+        let timed = record(
+            r#"{"shareId":1,"status":0,"public":0,"expiredType":0,"expiredTime":604797,"lastExpireTime":1792397064,"oriExpiredType":7}"#,
+        );
+        assert!(!timed.is_expired());
+        assert!(!timed.is_permanent());
+        assert_eq!(timed.expire_at(1791792267), 1792397064);
+
+        // 缺少 lastExpireTime 时按剩余秒数推算
+        let timed_no_last = record(
+            r#"{"shareId":2,"status":0,"public":0,"expiredType":0,"expiredTime":604797}"#,
+        );
+        assert_eq!(timed_no_last.expire_at(1000), 1000 + 604797);
+
+        let permanent = record(
+            r#"{"shareId":3,"status":0,"public":0,"expiredType":1,"expiredTime":0,"lastExpireTime":0,"oriExpiredType":0}"#,
+        );
+        assert!(permanent.is_permanent());
+        assert_eq!(permanent.expire_at(1000), 0);
+
+        let expired = record(
+            r#"{"shareId":4,"status":0,"public":0,"expiredType":-1,"expiredTime":0,"lastExpireTime":0,"oriExpiredType":7}"#,
+        );
+        assert!(expired.is_expired());
+        assert!(!expired.is_permanent());
+        assert_eq!(expired.expire_at(1000), 0);
+    }
 }
