@@ -131,6 +131,14 @@
               </el-button>
               <el-button
                   size="small"
+                  title="在网盘管理中打开上传目录并定位该文件"
+                  @click="handleLocate(item)"
+              >
+                <el-icon><Location /></el-icon>
+                定位
+              </el-button>
+              <el-button
+                  size="small"
                   type="danger"
                   @click="handleDelete(item)"
               >
@@ -202,6 +210,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRouter } from 'vue-router'
+import { dirname } from '@/api/file'
 import {
   getAllUploads,
   pauseUpload,
@@ -232,6 +242,7 @@ import {
   RefreshRight,
   Lock,
   ArrowDown,
+  Location,
 } from '@element-plus/icons-vue'
 import {useIsMobile} from '@/utils/responsive'
 import {createAdaptivePoller} from '@/utils/backendHealth'
@@ -249,6 +260,8 @@ const isMobile = useIsMobile()
 // 状态
 const loading = ref(false)
 const uploadItems = ref<UploadTask[]>([])
+
+const router = useRouter()
 
 // 多账号状态
 const authStore = useAuthStore()
@@ -389,6 +402,43 @@ async function handleResume(item: UploadTask) {
   } catch (error: any) {
     console.error('恢复任务失败:', error)
   }
+}
+
+// 定位到网盘：跳转网盘管理并打开上传目录、高亮该文件；
+// 任务属于其他账号时需先切换到该账号（网盘管理只浏览当前账号）
+async function handleLocate(item: UploadTask) {
+  if (!item.remote_path) {
+    ElMessage.warning('该任务缺少网盘路径，无法定位')
+    return
+  }
+  const ownerUid = typeof item.owner_uid === 'number' && item.owner_uid > 0 ? item.owner_uid : null
+  if (ownerUid !== null && ownerUid !== authStore.activeUid) {
+    const owner = authStore.accounts.find((a) => a.uid === ownerUid)
+    if (!owner) {
+      ElMessage.warning('该任务所属账号已不存在，无法定位')
+      return
+    }
+    const ownerName = owner.nickname || owner.username || `UID:${ownerUid}`
+    try {
+      await ElMessageBox.confirm(
+          `该任务属于账号「${ownerName}」，需要切换到该账号才能在网盘中定位，是否切换？`,
+          '切换账号',
+          { confirmButtonText: '切换并定位', cancelButtonText: '取消', type: 'info' },
+      )
+    } catch {
+      return
+    }
+    try {
+      await authStore.switchAccount(ownerUid)
+    } catch (err: any) {
+      ElMessage.error(err?.response?.data?.message || err?.message || '切换账号失败')
+      return
+    }
+  }
+  router.push({
+    path: '/files',
+    query: { path: dirname(item.remote_path), highlight: item.remote_path },
+  })
 }
 
 // 删除任务
