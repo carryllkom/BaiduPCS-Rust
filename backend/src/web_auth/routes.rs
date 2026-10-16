@@ -34,8 +34,14 @@ pub fn web_auth_routes(state: Arc<WebAuthState>) -> Router {
         .route("/totp/setup", post(totp_setup))
         .route("/totp/verify", post(totp_verify))
         .route("/totp/disable", post(totp_disable))
-        .route("/recovery-codes/regenerate", post(regenerate_recovery_codes))
-        .route_layer(middleware::from_fn_with_state(state.clone(), web_auth_middleware));
+        .route(
+            "/recovery-codes/regenerate",
+            post(regenerate_recovery_codes),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            web_auth_middleware,
+        ));
 
     public.merge(protected).with_state(state)
 }
@@ -55,8 +61,16 @@ mod tests {
     fn state(mode: AuthMode) -> Arc<WebAuthState> {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(create_auth_store_with_path(dir.path().join("auth.json")));
-        let config = WebAuthConfig { enabled: mode != AuthMode::None, mode };
-        Arc::new(WebAuthState::new(config, AuthCredentials::default(), None, store))
+        let config = WebAuthConfig {
+            enabled: mode != AuthMode::None,
+            mode,
+        };
+        Arc::new(WebAuthState::new(
+            config,
+            AuthCredentials::default(),
+            None,
+            store,
+        ))
     }
 
     /// 与 main.rs 相同的挂载结构：业务接口整体挂中间件，web-auth 走独立路由
@@ -65,13 +79,21 @@ mod tests {
             .route("/accounts/list", get(|| async { "ok" }))
             .route("/shares", get(|| async { "ok" }))
             .route("/ws", get(|| async { "ok" }))
-            .layer(middleware::from_fn_with_state(state.clone(), web_auth_middleware));
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                web_auth_middleware,
+            ));
         Router::new()
             .nest("/api/v1", api)
             .nest("/api/v1/web-auth", web_auth_routes(state))
     }
 
-    async fn call(mut app: Router, method: &str, uri: &str, headers: &[(header::HeaderName, &str)]) -> u16 {
+    async fn call(
+        mut app: Router,
+        method: &str,
+        uri: &str,
+        headers: &[(header::HeaderName, &str)],
+    ) -> u16 {
         let mut req = Request::builder().method(method).uri(uri);
         for (k, v) in headers {
             req = req.header(k, *v);
@@ -89,7 +111,11 @@ mod tests {
         let app = app(state(AuthMode::Password));
         // 以前不在白名单里的路径会被当作静态资源放行
         for uri in ["/api/v1/accounts/list", "/api/v1/shares", "/api/v1/ws"] {
-            assert_eq!(call(app.clone(), "GET", uri, &[]).await, WEB_AUTH_EXPIRED, "{uri}");
+            assert_eq!(
+                call(app.clone(), "GET", uri, &[]).await,
+                WEB_AUTH_EXPIRED,
+                "{uri}"
+            );
         }
     }
 
@@ -101,11 +127,23 @@ mod tests {
         let bearer = format!("Bearer {token}");
 
         assert_eq!(
-            call(app.clone(), "GET", "/api/v1/accounts/list", &[(header::AUTHORIZATION, &bearer)]).await,
+            call(
+                app.clone(),
+                "GET",
+                "/api/v1/accounts/list",
+                &[(header::AUTHORIZATION, &bearer)]
+            )
+            .await,
             StatusCode::OK.as_u16()
         );
         assert_eq!(
-            call(app.clone(), "GET", "/api/v1/web-auth/config", &[(header::AUTHORIZATION, &bearer)]).await,
+            call(
+                app.clone(),
+                "GET",
+                "/api/v1/web-auth/config",
+                &[(header::AUTHORIZATION, &bearer)]
+            )
+            .await,
             StatusCode::OK.as_u16()
         );
         // WebSocket 握手用查询参数携带令牌
@@ -129,23 +167,39 @@ mod tests {
             ("POST", "/api/v1/web-auth/recovery-codes/regenerate"),
         ];
         for (method, uri) in cases {
-            assert_eq!(call(app.clone(), method, uri, &[]).await, WEB_AUTH_EXPIRED, "{method} {uri}");
+            assert_eq!(
+                call(app.clone(), method, uri, &[]).await,
+                WEB_AUTH_EXPIRED,
+                "{method} {uri}"
+            );
         }
     }
 
     #[tokio::test]
     async fn test_web_auth_public_routes_stay_open() {
         let app = app(state(AuthMode::Password));
-        assert_eq!(call(app.clone(), "GET", "/api/v1/web-auth/status", &[]).await, StatusCode::OK.as_u16());
+        assert_eq!(
+            call(app.clone(), "GET", "/api/v1/web-auth/status", &[]).await,
+            StatusCode::OK.as_u16()
+        );
         // 登录接口可匿名访问（空请求体会被业务校验拒绝，但不能是 419）
-        assert_ne!(call(app, "POST", "/api/v1/web-auth/login", &[]).await, WEB_AUTH_EXPIRED);
+        assert_ne!(
+            call(app, "POST", "/api/v1/web-auth/login", &[]).await,
+            WEB_AUTH_EXPIRED
+        );
     }
 
     #[tokio::test]
     async fn test_everything_open_when_auth_disabled() {
         let app = app(state(AuthMode::None));
-        assert_eq!(call(app.clone(), "GET", "/api/v1/accounts/list", &[]).await, StatusCode::OK.as_u16());
+        assert_eq!(
+            call(app.clone(), "GET", "/api/v1/accounts/list", &[]).await,
+            StatusCode::OK.as_u16()
+        );
         // 未开启认证时要能在设置页先设密码、再开启认证
-        assert_eq!(call(app, "GET", "/api/v1/web-auth/config", &[]).await, StatusCode::OK.as_u16());
+        assert_eq!(
+            call(app, "GET", "/api/v1/web-auth/config", &[]).await,
+            StatusCode::OK.as_u16()
+        );
     }
 }

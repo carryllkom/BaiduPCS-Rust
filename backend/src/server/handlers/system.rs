@@ -220,7 +220,9 @@ mod tests {
     fn test_is_loopback() {
         assert!(is_loopback(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         assert!(is_loopback(IpAddr::V6(Ipv6Addr::LOCALHOST)));
-        assert!(is_loopback(IpAddr::V6(Ipv4Addr::LOCALHOST.to_ipv6_mapped())));
+        assert!(is_loopback(IpAddr::V6(
+            Ipv4Addr::LOCALHOST.to_ipv6_mapped()
+        )));
         assert!(!is_loopback(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2))));
         assert!(!is_loopback(IpAddr::V6(
             Ipv4Addr::new(192, 168, 1, 2).to_ipv6_mapped()

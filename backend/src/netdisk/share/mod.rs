@@ -165,9 +165,10 @@ mod tests {
 
     #[test]
     fn apaas_link_keeps_surl_without_prefix() {
-        let link =
-            parse_share_link("https://pan.baidu.com/apaas/share?surl=KqfOZ0gupO45mF7TyXzlRg&pwd=1HYy")
-                .unwrap();
+        let link = parse_share_link(
+            "https://pan.baidu.com/apaas/share?surl=KqfOZ0gupO45mF7TyXzlRg&pwd=1HYy",
+        )
+        .unwrap();
         assert_eq!(link.kind, ShareKind::Apaas);
         // 关键：不能补 "1" 前缀
         assert_eq!(link.short_key, "KqfOZ0gupO45mF7TyXzlRg");

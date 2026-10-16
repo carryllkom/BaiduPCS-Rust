@@ -168,7 +168,9 @@ pub async fn web_auth_middleware(
             );
             // 将认证信息注入请求扩展
             let mut request = request;
-            request.extensions_mut().insert(AuthenticatedUser { claims });
+            request
+                .extensions_mut()
+                .insert(AuthenticatedUser { claims });
             next.run(request).await
         }
         Err(e) => {
@@ -250,7 +252,8 @@ where
             .cloned()
             .ok_or_else(|| {
                 (
-                    StatusCode::from_u16(WEB_AUTH_EXPIRED_STATUS).unwrap_or(StatusCode::UNAUTHORIZED),
+                    StatusCode::from_u16(WEB_AUTH_EXPIRED_STATUS)
+                        .unwrap_or(StatusCode::UNAUTHORIZED),
                     Json(AuthErrorResponse::web_auth_expired("未认证")),
                 )
             })
@@ -283,7 +286,10 @@ mod tests {
             .body(Body::empty())
             .unwrap();
 
-        assert_eq!(extract_access_token(&request), Some("ws_token_789".to_string()));
+        assert_eq!(
+            extract_access_token(&request),
+            Some("ws_token_789".to_string())
+        );
     }
 
     #[test]
@@ -317,7 +323,10 @@ mod tests {
 
         let request = Request::builder()
             .uri("/api/v1/files")
-            .header(header::COOKIE, "web_auth_access_token=cookie_token_456; other=value")
+            .header(
+                header::COOKIE,
+                "web_auth_access_token=cookie_token_456; other=value",
+            )
             .body(Body::empty())
             .unwrap();
 

@@ -438,7 +438,10 @@ impl ShareSyncManager {
         // run —— 不收编、不续跑，这批活儿直接变孤儿（实测踩到过：接管跑到一半被杀，
         // 重启后一条续跑日志都没有，前端全是暂停）。
         if let Err(e) = self.persistence.mark_run_running(&run_id) {
-            warn!("续跑接管: 标记 run 为运行中失败 run_id={}, error={}", run_id, e);
+            warn!(
+                "续跑接管: 标记 run 为运行中失败 run_id={}, error={}",
+                run_id, e
+            );
         }
         let _ = self
             .persistence
@@ -506,8 +509,8 @@ impl ShareSyncManager {
                             .filter(|s| s.status == "paused")
                             .collect();
                     if !paused.is_empty() {
-                        let n =
-                            restart_stalled_share_sync_downloads(&tm, &paused, Duration::ZERO).await;
+                        let n = restart_stalled_share_sync_downloads(&tm, &paused, Duration::ZERO)
+                            .await;
                         if n > 0 {
                             info!(
                                 "share_sync 续跑接管: 订阅 {} 唤醒了 {} 个残留下载",
@@ -732,7 +735,10 @@ impl ShareSyncManager {
 
             for run_id in &target.fresh {
                 if let Err(e) = self.persistence.delete_snapshot_for_run(run_id) {
-                    warn!("清理中断 run 的候选快照失败: run_id={}, error={}", run_id, e);
+                    warn!(
+                        "清理中断 run 的候选快照失败: run_id={}, error={}",
+                        run_id, e
+                    );
                 }
             }
             let cfg_id = share_sync_backup_config_id(&id);
@@ -1319,11 +1325,10 @@ impl ShareSyncManager {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3);
-        let snapshot_base_delay_ms: u64 =
-            std::env::var("BAIDUPCS_SHARE_SYNC_SNAPSHOT_BACKOFF_MS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1000);
+        let snapshot_base_delay_ms: u64 = std::env::var("BAIDUPCS_SHARE_SYNC_SNAPSHOT_BACKOFF_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000);
         let mut snapshot_attempt: u32 = 0;
 
         // 跨「整轮重试」复用的目录缓存：只在**本次 run** 内有效。
@@ -1428,7 +1433,9 @@ impl ShareSyncManager {
         };
         // 成功抓取到分享内容 → 链接可用，归零失效计数（如曾标记失效也清除）。
         self.clear_link_failure(id);
-        let _ = self.persistence.update_run_phase(&run_id, RUN_PHASE_DIFFING);
+        let _ = self
+            .persistence
+            .update_run_phase(&run_id, RUN_PHASE_DIFFING);
 
         // 2) 绑定 subscription_id 后，先读"上次成功应用的快照"再计算 diff。
         //    当前快照必须等执行成功后才能推进基线；否则下载/转存失败会把
@@ -1539,7 +1546,7 @@ impl ShareSyncManager {
             id.to_string(),
             owner_uid,
         )
-            .await;
+        .await;
 
         // 仅当 run 完成**且**没有任何子项因资源类原因（配额满 / 本地磁盘满）被跳过时，
         // 才推进快照基线。否则被跳过、尚未真正落地的项会被写入新基线，导致下一次
@@ -2406,7 +2413,10 @@ async fn restart_stalled_share_sync_downloads(
                     match download_manager.resume_task(&task_id).await {
                         Ok(()) => {
                             restarted += 1;
-                            warn!("share-sync: paused download task resumed: task_id={}", task_id);
+                            warn!(
+                                "share-sync: paused download task resumed: task_id={}",
+                                task_id
+                            );
                         }
                         Err(e) => warn!(
                             "share-sync: resume paused download task failed: task_id={}, error={}",
@@ -2742,7 +2752,12 @@ impl ProductionHooks {
         // backup_config 的查询里（见 `DownloadTask::new_with_group`），要单独取
         if let Some(fdm) = tm.folder_download_manager_handle().await {
             for f in fdm.get_folders_by_backup_config(&cfg).await {
-                statuses.extend(dm.get_tasks_by_group(&f.id).await.iter().map(|t| t.status.clone()));
+                statuses.extend(
+                    dm.get_tasks_by_group(&f.id)
+                        .await
+                        .iter()
+                        .map(|t| t.status.clone()),
+                );
             }
         }
 
@@ -3144,8 +3159,8 @@ impl ExecutorHooks for ProductionHooks {
                     let retry_due = idle_for >= retry_after
                         && stall_retry_attempts < stall_retry_max
                         && last_stall_retry_at
-                        .map(|last| now.duration_since(last) >= retry_after)
-                        .unwrap_or(true);
+                            .map(|last| now.duration_since(last) >= retry_after)
+                            .unwrap_or(true);
                     if retry_due {
                         last_stall_retry_at = Some(now);
                         let restarted = restart_stalled_share_sync_downloads(
@@ -3153,7 +3168,7 @@ impl ExecutorHooks for ProductionHooks {
                             &subtasks,
                             stall_retry_cooldown,
                         )
-                            .await;
+                        .await;
                         if restarted > 0 {
                             stall_retry_attempts += 1;
                             last_activity_at = tokio::time::Instant::now();
@@ -3461,7 +3476,10 @@ fn prefetched_share_for_captured(
 fn share_url_for_captured(captured: &CapturedShare) -> String {
     let base = match captured.kind {
         crate::transfer::ShareKind::Apaas => {
-            format!("https://pan.baidu.com/apaas/share?surl={}", captured.short_key)
+            format!(
+                "https://pan.baidu.com/apaas/share?surl={}",
+                captured.short_key
+            )
         }
         crate::transfer::ShareKind::Personal => {
             format!("https://pan.baidu.com/s/{}", captured.short_key)
@@ -3810,8 +3828,18 @@ mod tests {
             assert!(is_terminal_subtask_status(s), "{} 应是终态", s);
         }
         // 非终态：续跑要继续等
-        for s in ["pending", "downloading", "paused", "scanning", "transferring"] {
-            assert!(!is_terminal_subtask_status(s), "{} 不是终态，续跑要继续等", s);
+        for s in [
+            "pending",
+            "downloading",
+            "paused",
+            "scanning",
+            "transferring",
+        ] {
+            assert!(
+                !is_terminal_subtask_status(s),
+                "{} 不是终态，续跑要继续等",
+                s
+            );
         }
     }
 
@@ -3976,7 +4004,11 @@ mod tests {
             "有子任务在跑 → 照实上报"
         );
 
-        for terminal in [FolderStatus::Failed, FolderStatus::Cancelled, FolderStatus::Completed] {
+        for terminal in [
+            FolderStatus::Failed,
+            FolderStatus::Cancelled,
+            FolderStatus::Completed,
+        ] {
             let s = folder_subtask_status(terminal.clone(), true);
             assert!(
                 is_terminal_subtask_status(&s),
@@ -4077,8 +4109,8 @@ mod tests {
             resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         assert_eq!(m.list_subscriptions().len(), 0);
     }
 
@@ -4091,8 +4123,8 @@ mod tests {
             resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let s = m.create_subscription(sub("a")).unwrap();
         assert_eq!(m.list_subscriptions().len(), 1);
         assert!(m.get_subscription(&s.id).is_some());
@@ -4114,8 +4146,8 @@ mod tests {
             resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         let mut a = sub("a");
         a.owner_uid = 1;
@@ -4147,8 +4179,8 @@ mod tests {
             resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let s = m.create_subscription(sub("a")).unwrap();
         let original_created = s.created_at;
 
@@ -4169,8 +4201,8 @@ mod tests {
             resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let s = m.create_subscription(sub("a")).unwrap();
         m.set_enabled(&s.id, false).unwrap();
         assert!(!m.get_subscription(&s.id).unwrap().enabled);
@@ -4538,8 +4570,8 @@ mod tests {
             resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let mut bad = sub("a");
         bad.share_url = "https://example.com".into();
         let r = m.create_subscription(bad);
@@ -4561,8 +4593,8 @@ mod tests {
             resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let list = m.list_subscriptions();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].name, "preloaded");
@@ -4577,8 +4609,8 @@ mod tests {
             resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let s = m.create_subscription(sub("a")).unwrap();
         // netdisk_client 为 None → 应报错
         let r = m.execute_one(&s.id).await;
@@ -4596,8 +4628,8 @@ mod tests {
             resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let mut sub = sub("a");
         sub.owner_uid = 1;
         let s = m.create_subscription(sub).unwrap();

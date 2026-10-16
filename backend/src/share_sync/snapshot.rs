@@ -389,12 +389,7 @@ impl<'a> SnapshotCollector<'a> {
                 self.rate_limiter.acquire().await;
                 let r = self
                     .client
-                    .list_share_files_for(
-                        &self.share_info(),
-                        1,
-                        page_size,
-                        self.randsk.as_deref(),
-                    )
+                    .list_share_files_for(&self.share_info(), 1, page_size, self.randsk.as_deref())
                     .await
                     // 用 `{:#}` 保留完整 anyhow 错误链（含底层超时/百度 errno+errmsg），
                     // 否则 `to_string()` 只取最外层 context，排障时看不到百度到底返回了什么。
@@ -527,13 +522,7 @@ impl<'a> SnapshotCollector<'a> {
             let mut page: u32 = 1;
             loop {
                 let batch = self
-                    .list_dir_page_with_retry(
-                        &root_shareid,
-                        &root_uk,
-                        &dir,
-                        page,
-                        page_size,
-                    )
+                    .list_dir_page_with_retry(&root_shareid, &root_uk, &dir, page, page_size)
                     .await?;
 
                 if batch.is_empty() {
@@ -1283,8 +1272,7 @@ mod tests {
         includes.insert("/大主宰3D".to_string());
         let index = build_include_index(&includes);
         let excludes =
-            compile_exclude_patterns(&["*S01*".into(), "*Soft*".into(), "*.zip*".into()])
-                .unwrap();
+            compile_exclude_patterns(&["*S01*".into(), "*Soft*".into(), "*.zip*".into()]).unwrap();
 
         let mk_dir = |path: &str, fs_id: u64| {
             let name = path.rsplit('/').next().unwrap().to_string();
@@ -1328,8 +1316,14 @@ mod tests {
         for (dir, why) in [
             ("/大主宰3D", "含被排除的 S01 与深层内容"),
             ("/大主宰3D/S02 连载中", "含深层被排除内容"),
-            ("/大主宰3D/S02 连载中/S02 4K NoSub", "直接含被排除的 Soft/zip"),
-            ("/大主宰3D/S02 连载中/S02 4K NoSub/字幕文件", "全部子项被排除"),
+            (
+                "/大主宰3D/S02 连载中/S02 4K NoSub",
+                "直接含被排除的 Soft/zip",
+            ),
+            (
+                "/大主宰3D/S02 连载中/S02 4K NoSub/字幕文件",
+                "全部子项被排除",
+            ),
         ] {
             let d = by_path
                 .get(dir)
@@ -1494,7 +1488,12 @@ mod tests {
     fn test_remap_include_absolute_path_to_share_root() {
         // 用户实际场景：分享根是单个目录 scan_test，分享内真实路径
         // /13/a测试上传1/scan_test；前端按根级勾选把真实绝对路径存进 include。
-        let files = vec![shared_file("/13/a测试上传1/scan_test", "scan_test", 1, true)];
+        let files = vec![shared_file(
+            "/13/a测试上传1/scan_test",
+            "scan_test",
+            1,
+            true,
+        )];
         let share_root = infer_share_root(&files);
         assert_eq!(share_root, "/13/a测试上传1");
 

@@ -288,19 +288,17 @@ impl Default for ConflictStrategyConfig {
         Self {
             default_upload_strategy: crate::uploader::conflict::UploadConflictStrategy::SmartDedup,
             default_download_strategy:
-            crate::uploader::conflict::DownloadConflictStrategy::Overwrite,
+                crate::uploader::conflict::DownloadConflictStrategy::Overwrite,
         }
     }
 }
 
 /// 网络配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NetworkConfig {
     #[serde(default)]
     pub proxy: ProxyConfig,
 }
-
 
 /// 自动备份配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -862,8 +860,7 @@ impl Default for TransferConfig {
 }
 
 /// 文件系统配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FilesystemConfig {
     /// 允许访问的路径白名单（空表示允许所有）
     #[serde(default)]
@@ -885,7 +882,6 @@ pub struct FilesystemConfig {
     pub enforce_allowlist_on_followed_symlinks: bool,
 }
 
-
 impl FilesystemConfig {
     /// 校验文件系统配置的结构合法性
     ///
@@ -904,19 +900,18 @@ impl FilesystemConfig {
             if !path.is_absolute() {
                 anyhow::bail!(
                     "filesystem.allowed_paths[{}] 必须是绝对路径，当前值: {:?}",
-                    i, path_str
+                    i,
+                    path_str
                 );
             }
             if !path.exists() {
                 tracing::warn!(
                     "filesystem.allowed_paths[{}] 路径不存在（运行时将跳过该条目）: {:?}",
-                    i, path_str
+                    i,
+                    path_str
                 );
             } else if !path.is_dir() {
-                anyhow::bail!(
-                    "filesystem.allowed_paths[{}] 不是目录: {:?}",
-                    i, path_str
-                );
+                anyhow::bail!("filesystem.allowed_paths[{}] 不是目录: {:?}", i, path_str);
             }
         }
 
@@ -938,10 +933,7 @@ impl FilesystemConfig {
                 return Ok(());
             }
             if !path.is_dir() {
-                anyhow::bail!(
-                    "filesystem.default_path 不是目录: {:?}",
-                    default_path
-                );
+                anyhow::bail!("filesystem.default_path 不是目录: {:?}", default_path);
             }
             // default_path 必须位于 allowed_paths 内（如果白名单非空）
             if !self.allowed_paths.is_empty() {
@@ -1185,19 +1177,18 @@ impl DownloadConfig {
         const MB: u64 = 1024 * KB;
 
         // 根据文件大小计算基础分片大小
-        let base_chunk_size = if file_size_bytes > 0
-            && file_size_bytes <= SMALL_FILE_SINGLE_CHUNK_THRESHOLD
-        {
-            file_size_bytes // <= 10MB → 尽量单分片（仍受下方两道上限裁剪）
-        } else if file_size_bytes < 50 * MB {
-            MB // 10-50MB → 1MB
-        } else if file_size_bytes < 100 * MB {
-            2 * MB // 50-100MB → 2MB
-        } else if file_size_bytes < 500 * MB {
-            4 * MB // 100-500MB → 4MB
-        } else {
-            5 * MB // >= 500MB → 5MB（百度限制）
-        };
+        let base_chunk_size =
+            if file_size_bytes > 0 && file_size_bytes <= SMALL_FILE_SINGLE_CHUNK_THRESHOLD {
+                file_size_bytes // <= 10MB → 尽量单分片（仍受下方两道上限裁剪）
+            } else if file_size_bytes < 50 * MB {
+                MB // 10-50MB → 1MB
+            } else if file_size_bytes < 100 * MB {
+                2 * MB // 50-100MB → 2MB
+            } else if file_size_bytes < 500 * MB {
+                4 * MB // 100-500MB → 4MB
+            } else {
+                5 * MB // >= 500MB → 5MB（百度限制）
+            };
 
         // 根据 VIP 等级限制最大分片大小
         let max_allowed = vip_type.max_chunk_size_mb() * MB;
@@ -1651,9 +1642,11 @@ mod tests {
         assert!(legacy.remember_netdisk_path);
         assert!(!legacy.account_quick_bar);
 
-        let saved: UiConfig =
-            toml::from_str("remember_netdisk_path = false
-account_quick_bar = true").unwrap();
+        let saved: UiConfig = toml::from_str(
+            "remember_netdisk_path = false
+account_quick_bar = true",
+        )
+        .unwrap();
         assert!(!saved.remember_netdisk_path);
         assert!(saved.account_quick_bar);
     }
@@ -1910,9 +1903,11 @@ account_quick_bar = true").unwrap();
     #[test]
     fn test_share_direct_download_config_missing_sweep_interval_defaults() {
         // 旧配置文件没有 orphan_sweep_interval_hours 字段时取默认值
-        let config: ShareDirectDownloadConfig =
-            toml::from_str("temp_dir = \"/.bpr_share_temp/\"
-").unwrap();
+        let config: ShareDirectDownloadConfig = toml::from_str(
+            "temp_dir = \"/.bpr_share_temp/\"
+",
+        )
+        .unwrap();
         assert_eq!(config.orphan_sweep_interval_hours, 6);
     }
 

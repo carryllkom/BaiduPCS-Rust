@@ -499,7 +499,6 @@ impl UploadErrorKind {
     }
 }
 
-
 // =====================================================
 // 分享相关类型定义
 // =====================================================
@@ -713,7 +712,6 @@ impl ShareSURLInfoResponse {
     }
 }
 
-
 // =====================================================
 // 删除文件相关类型定义
 // =====================================================
@@ -807,7 +805,12 @@ impl DeleteFilesResponse {
     }
 
     /// 创建带 errno 的失败响应
-    pub fn failure_with_errno(error: String, errno: i32, authwidget: Option<AuthWidget>, verify_scene: Option<i32>) -> Self {
+    pub fn failure_with_errno(
+        error: String,
+        errno: i32,
+        authwidget: Option<AuthWidget>,
+        verify_scene: Option<i32>,
+    ) -> Self {
         Self {
             success: false,
             error: Some(error),
@@ -1215,9 +1218,8 @@ mod tests {
         assert_eq!(timed.expire_at(1791792267), 1792397064);
 
         // 缺少 lastExpireTime 时按剩余秒数推算
-        let timed_no_last = record(
-            r#"{"shareId":2,"status":0,"public":0,"expiredType":0,"expiredTime":604797}"#,
-        );
+        let timed_no_last =
+            record(r#"{"shareId":2,"status":0,"public":0,"expiredType":0,"expiredTime":604797}"#);
         assert_eq!(timed_no_last.expire_at(1000), 1000 + 604797);
 
         let permanent = record(

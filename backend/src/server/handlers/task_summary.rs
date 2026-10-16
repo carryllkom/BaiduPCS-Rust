@@ -119,7 +119,11 @@ fn download_task_unit(t: &DownloadTask) -> SummaryUnit {
         state,
         bytes_total: t.total_size,
         bytes_done: t.downloaded_size,
-        speed: if t.status == TaskStatus::Downloading { t.speed } else { 0 },
+        speed: if t.status == TaskStatus::Downloading {
+            t.speed
+        } else {
+            0
+        },
         paused: t.status == TaskStatus::Paused,
         scanning: false,
     }
@@ -157,9 +161,7 @@ fn history_folder_unit(status: &str) -> Option<SummaryUnit> {
 
 fn upload_task_unit(t: &UploadTask) -> SummaryUnit {
     let state = match t.status {
-        UploadTaskStatus::Completed | UploadTaskStatus::RapidUploadSuccess => {
-            UnitState::Completed
-        }
+        UploadTaskStatus::Completed | UploadTaskStatus::RapidUploadSuccess => UnitState::Completed,
         UploadTaskStatus::Failed => UnitState::Failed,
         _ => UnitState::Running,
     };
@@ -167,14 +169,23 @@ fn upload_task_unit(t: &UploadTask) -> SummaryUnit {
         state,
         bytes_total: t.total_size,
         bytes_done: t.uploaded_size,
-        speed: if t.status == UploadTaskStatus::Uploading { t.speed } else { 0 },
+        speed: if t.status == UploadTaskStatus::Uploading {
+            t.speed
+        } else {
+            0
+        },
         paused: t.status == UploadTaskStatus::Paused,
         scanning: false,
     }
 }
 
 async fn history_db(app_state: &AppState) -> Option<Arc<HistoryDbManager>> {
-    app_state.persistence_manager.lock().await.history_db().cloned()
+    app_state
+        .persistence_manager
+        .lock()
+        .await
+        .history_db()
+        .cloned()
 }
 
 /// 列表页会从历史库补上的已完成任务 id
@@ -251,8 +262,16 @@ async fn download_summary(app_state: &AppState) -> TransferSummary {
         })
         .await;
 
-    units.extend(history_ids.iter().map(|_| SummaryUnit::history(UnitState::Completed)));
-    units.extend(history_folders.values().filter_map(|status| history_folder_unit(status)));
+    units.extend(
+        history_ids
+            .iter()
+            .map(|_| SummaryUnit::history(UnitState::Completed)),
+    );
+    units.extend(
+        history_folders
+            .values()
+            .filter_map(|status| history_folder_unit(status)),
+    );
 
     aggregate(&units)
 }
@@ -271,7 +290,11 @@ async fn upload_summary(app_state: &AppState) -> TransferSummary {
         })
         .await;
     }
-    units.extend(history_ids.iter().map(|_| SummaryUnit::history(UnitState::Completed)));
+    units.extend(
+        history_ids
+            .iter()
+            .map(|_| SummaryUnit::history(UnitState::Completed)),
+    );
 
     aggregate(&units)
 }
@@ -281,8 +304,7 @@ async fn upload_summary(app_state: &AppState) -> TransferSummary {
 pub async fn get_tasks_summary(
     State(app_state): State<AppState>,
 ) -> Json<ApiResponse<TasksSummary>> {
-    let (download, upload) =
-        tokio::join!(download_summary(&app_state), upload_summary(&app_state));
+    let (download, upload) = tokio::join!(download_summary(&app_state), upload_summary(&app_state));
     Json(ApiResponse::success(TasksSummary { download, upload }))
 }
 
@@ -304,7 +326,9 @@ mod tests {
     #[test]
     fn test_counts_tasks_like_list_but_bytes_only_unfinished() {
         // 列表：100 个已完成（部分只在历史库里）+ 1 个下载中 → 100/101，进度条只看那 1 个
-        let mut units: Vec<_> = (0..60).map(|_| unit(UnitState::Completed, (10, 10))).collect();
+        let mut units: Vec<_> = (0..60)
+            .map(|_| unit(UnitState::Completed, (10, 10)))
+            .collect();
         units.extend((0..40).map(|_| SummaryUnit::history(UnitState::Completed)));
         units.push(unit(UnitState::Running, (100, 40)));
 
@@ -315,7 +339,10 @@ mod tests {
 
     #[test]
     fn test_all_finished_has_no_remaining() {
-        let units = vec![unit(UnitState::Completed, (10, 10)), unit(UnitState::Failed, (10, 3))];
+        let units = vec![
+            unit(UnitState::Completed, (10, 10)),
+            unit(UnitState::Failed, (10, 3)),
+        ];
         let s = aggregate(&units);
         assert_eq!((s.total, s.completed, s.failed, s.remaining), (2, 1, 1, 0));
         assert_eq!(aggregate(&[]), TransferSummary::default());
@@ -323,7 +350,10 @@ mod tests {
 
     #[test]
     fn test_failed_counted_but_bytes_excluded() {
-        let units = vec![unit(UnitState::Running, (100, 50)), unit(UnitState::Failed, (1000, 10))];
+        let units = vec![
+            unit(UnitState::Running, (100, 50)),
+            unit(UnitState::Failed, (1000, 10)),
+        ];
         let s = aggregate(&units);
         assert_eq!((s.total, s.completed, s.failed, s.remaining), (2, 0, 1, 1));
         assert_eq!((s.total_bytes, s.done_bytes), (100, 50));
@@ -332,7 +362,10 @@ mod tests {
     #[test]
     fn test_folder_counts_as_one_task() {
         // 文件夹里有很多文件也只算 1 个任务；速度汇总
-        let mut folder = FolderDownload::new("/remote/dir".to_string(), std::path::PathBuf::from("/local/dir"));
+        let mut folder = FolderDownload::new(
+            "/remote/dir".to_string(),
+            std::path::PathBuf::from("/local/dir"),
+        );
         folder.status = FolderStatus::Downloading;
         folder.total_files = 50;
         folder.completed_count = 20;
@@ -362,7 +395,10 @@ mod tests {
 
     #[test]
     fn test_folder_scanning_only_when_status_scanning() {
-        let mut f = FolderDownload::new("/remote/dir".to_string(), std::path::PathBuf::from("/local/dir"));
+        let mut f = FolderDownload::new(
+            "/remote/dir".to_string(),
+            std::path::PathBuf::from("/local/dir"),
+        );
         f.scan_completed = false;
 
         f.status = FolderStatus::Paused;
@@ -379,8 +415,14 @@ mod tests {
 
     #[test]
     fn test_history_folder_units() {
-        assert_eq!(history_folder_unit("completed").unwrap().state, UnitState::Completed);
-        assert_eq!(history_folder_unit("failed").unwrap().state, UnitState::Failed);
+        assert_eq!(
+            history_folder_unit("completed").unwrap().state,
+            UnitState::Completed
+        );
+        assert_eq!(
+            history_folder_unit("failed").unwrap().state,
+            UnitState::Failed
+        );
         assert!(history_folder_unit("cancelled").is_none());
     }
 

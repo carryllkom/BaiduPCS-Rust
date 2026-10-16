@@ -162,7 +162,10 @@ pub async fn create_transfer(
     {
         let mgr = app_state.account_manager.lock().await;
         if mgr.get_user(effective_uid).is_none() {
-            error!("create_transfer: 目标账号不存在: uid={}", effective_uid.raw());
+            error!(
+                "create_transfer: 目标账号不存在: uid={}",
+                effective_uid.raw()
+            );
             return Json(TransferApiResponse::error(
                 error_codes::MANAGER_NOT_READY,
                 format!("账号 uid={} 不存在", effective_uid.raw()),
@@ -527,7 +530,10 @@ pub async fn preview_share_files(
             error!("预览分享文件失败: {}", err_msg);
 
             // 根据错误内容返回不同的错误码（与 create_transfer 一致）
-            let code = if err_msg.contains("需要密码") || err_msg.contains("need password") || err_msg.contains("需要提取码") {
+            let code = if err_msg.contains("需要密码")
+                || err_msg.contains("need password")
+                || err_msg.contains("需要提取码")
+            {
                 error_codes::NEED_PASSWORD
             } else if err_msg.contains("提取码错误") || err_msg.contains("-9") {
                 error_codes::INVALID_PASSWORD
@@ -607,8 +613,15 @@ pub async fn preview_share_dir(
         .await
     {
         Ok(files) => {
-            info!("浏览分享子目录成功: {} 个文件, dir={}", files.len(), req.dir);
-            Json(TransferApiResponse::success(PreviewShareResponse { files, share_info: None }))
+            info!(
+                "浏览分享子目录成功: {} 个文件, dir={}",
+                files.len(),
+                req.dir
+            );
+            Json(TransferApiResponse::success(PreviewShareResponse {
+                files,
+                share_info: None,
+            }))
         }
         Err(e) => {
             let err_msg = e.to_string();
@@ -627,7 +640,10 @@ pub async fn cleanup_orphaned_temp_dirs(
     State(app_state): State<AppState>,
     Query(query): Query<CleanupOrphanedQuery>,
 ) -> Json<TransferApiResponse<CleanupOrphanedResponse>> {
-    info!("手动清理孤立临时目录: include_foreign={}", query.include_foreign);
+    info!(
+        "手动清理孤立临时目录: include_foreign={}",
+        query.include_foreign
+    );
 
     let transfer_manager = match app_state.transfer_manager_for_active().await {
         Some(tm) => tm,

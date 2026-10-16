@@ -43,19 +43,38 @@ fn normalize_path(path: &str) -> String {
 }
 
 /// 校验请求字段并按模式建任务（账号是否存在由调用方另行校验）
-fn build_job(req: &CreateCrossAccountJobRequest, source: Uid, target: Uid) -> Result<CrossAccountJob, String> {
+fn build_job(
+    req: &CreateCrossAccountJobRequest,
+    source: Uid,
+    target: Uid,
+) -> Result<CrossAccountJob, String> {
     let paths = validate_source_paths(&req.paths)?;
     if req.mode == CrossAccountMode::Download {
-        let local = req.local_download_path.as_deref().map(str::trim).unwrap_or_default();
+        let local = req
+            .local_download_path
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default();
         if local.is_empty() {
             return Err("请选择本地下载目录".to_string());
         }
-        return Ok(CrossAccountJob::new_download(source, target, paths, local.to_string()));
+        return Ok(CrossAccountJob::new_download(
+            source,
+            target,
+            paths,
+            local.to_string(),
+        ));
     }
     if !req.target_dir.trim().starts_with('/') {
         return Err(format!("目标目录必须以 / 开头: {}", req.target_dir));
     }
-    Ok(CrossAccountJob::new(req.mode, source, target, paths, normalize_path(&req.target_dir)))
+    Ok(CrossAccountJob::new(
+        req.mode,
+        source,
+        target,
+        paths,
+        normalize_path(&req.target_dir),
+    ))
 }
 
 /// 校验并归一化源路径
@@ -81,7 +100,10 @@ fn validate_source_paths(paths: &[String]) -> Result<Vec<String>, String> {
     // （["/d", "/d/a.txt"] 会让分享里既有整个 d 又有平级的 a.txt）和跨目录同名
     // （["/x/a.txt", "/y/a.txt"] 转存到同一目标目录必然冲突）。
     let parent = cross_account::parent_dir(&normalized[0]);
-    if normalized.iter().any(|p| cross_account::parent_dir(p) != parent) {
+    if normalized
+        .iter()
+        .any(|p| cross_account::parent_dir(p) != parent)
+    {
         return Err("跨账号操作只支持同一目录下的文件，跨目录的搜索结果请分批操作".to_string());
     }
     Ok(normalized)
@@ -132,7 +154,9 @@ pub async fn create_cross_account_job(
         )));
     }
 
-    Ok(Json(ApiResponse::success(cross_account::spawn_job(&state, job))))
+    Ok(Json(ApiResponse::success(cross_account::spawn_job(
+        &state, job,
+    ))))
 }
 
 /// 查询单个跨账号任务
@@ -144,7 +168,10 @@ pub async fn get_cross_account_job(
 ) -> Result<Json<ApiResponse<CrossAccountJob>>, StatusCode> {
     match state.cross_account_jobs.get(&id) {
         Some(job) => Ok(Json(ApiResponse::success(job))),
-        None => Ok(Json(ApiResponse::error(404, "任务不存在或已过期".to_string()))),
+        None => Ok(Json(ApiResponse::error(
+            404,
+            "任务不存在或已过期".to_string(),
+        ))),
     }
 }
 
@@ -195,14 +222,18 @@ mod tests {
 
     #[test]
     fn build_copy_move_job_normalizes_target_dir() {
-        let job = build(r#"{"target_uid":2,"paths":["/a"],"target_dir":"/dst/","mode":"move"}"#).unwrap();
+        let job =
+            build(r#"{"target_uid":2,"paths":["/a"],"target_dir":"/dst/","mode":"move"}"#).unwrap();
         assert_eq!(job.mode, CrossAccountMode::Move);
         assert_eq!(job.target_dir, "/dst");
         assert!(job.local_download_path.is_none());
-        let job = build(r#"{"target_uid":2,"paths":["/a"],"target_dir":"/","mode":"copy"}"#).unwrap();
+        let job =
+            build(r#"{"target_uid":2,"paths":["/a"],"target_dir":"/","mode":"copy"}"#).unwrap();
         assert_eq!(job.target_dir, "/");
         // 复制 / 移动必须给出网盘目录
-        assert!(build(r#"{"target_uid":2,"paths":["/a"],"target_dir":"dst","mode":"copy"}"#).is_err());
+        assert!(
+            build(r#"{"target_uid":2,"paths":["/a"],"target_dir":"dst","mode":"copy"}"#).is_err()
+        );
         assert!(build(r#"{"target_uid":2,"paths":["/a"],"mode":"copy"}"#).is_err());
     }
 
@@ -217,7 +248,10 @@ mod tests {
         assert_eq!(job.local_download_path.as_deref(), Some("D:/dl"));
         assert_eq!(job.target_dir, "");
         assert!(build(r#"{"target_uid":2,"paths":["/a"],"mode":"download"}"#).is_err());
-        assert!(build(r#"{"target_uid":2,"paths":["/a"],"local_download_path":"  ","mode":"download"}"#).is_err());
+        assert!(build(
+            r#"{"target_uid":2,"paths":["/a"],"local_download_path":"  ","mode":"download"}"#
+        )
+        .is_err());
         // 源路径规则对下载同样适用
         assert!(build(r#"{"target_uid":2,"paths":["/x/a","/y/b"],"local_download_path":"D:/dl","mode":"download"}"#).is_err());
     }
@@ -227,6 +261,9 @@ mod tests {
         let r = req(r#"{"target_uid":2,"paths":["/a"],"target_dir":"/","mode":"move"}"#);
         assert_eq!(r.mode, CrossAccountMode::Move);
         assert!(r.source_uid.is_none());
-        assert_eq!(req(r#"{"target_uid":2,"paths":["/a"],"mode":"download"}"#).mode, CrossAccountMode::Download);
+        assert_eq!(
+            req(r#"{"target_uid":2,"paths":["/a"],"mode":"download"}"#).mode,
+            CrossAccountMode::Download
+        );
     }
 }

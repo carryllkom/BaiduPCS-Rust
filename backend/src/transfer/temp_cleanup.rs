@@ -47,7 +47,9 @@ const INSTANCE_ID_FILE: &str = "instance_id";
 
 /// 实例 id 是否合法：8~32 位小写十六进制
 fn is_valid_instance_id(s: &str) -> bool {
-    (8..=32).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    (8..=32).contains(&s.len())
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// 读取或生成实例 id（持久化在 `{config_dir}/instance_id`）
@@ -73,8 +75,8 @@ pub fn init_instance_id(config_dir: &Path) -> Option<&'static str> {
         Some(id) => id,
         None => {
             let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
-            if let Err(e) = std::fs::create_dir_all(config_dir)
-                .and_then(|_| std::fs::write(&file, &id))
+            if let Err(e) =
+                std::fs::create_dir_all(config_dir).and_then(|_| std::fs::write(&file, &id))
             {
                 warn!(
                     "写入实例 id 失败，分享直下临时目录退回平铺布局（不启用自动孤儿清理）: {:?}, error={}",
@@ -93,7 +95,9 @@ pub fn init_instance_id(config_dir: &Path) -> Option<&'static str> {
 
 /// 本实例的命名空间目录名（`inst-{id}`）；实例 id 不可用时为 None
 pub fn own_namespace() -> Option<String> {
-    INSTANCE_ID.get().map(|id| format!("{}{}", NAMESPACE_PREFIX, id))
+    INSTANCE_ID
+        .get()
+        .map(|id| format!("{}{}", NAMESPACE_PREFIX, id))
 }
 
 /// 标记本进程任务恢复已完成（孤儿清理的前置条件）
@@ -324,7 +328,9 @@ mod tests {
         assert!(validate_task_temp_dir(&format!("/other/{}", U1), root).is_err());
         // 层级过深 / 命名空间名非法
         assert!(validate_task_temp_dir(&format!("/.bpr_share_temp/{}/{}", U1, U2), root).is_err());
-        assert!(validate_task_temp_dir(&format!("/.bpr_share_temp/inst-XYZ/{}", U1), root).is_err());
+        assert!(
+            validate_task_temp_dir(&format!("/.bpr_share_temp/inst-XYZ/{}", U1), root).is_err()
+        );
         // 根不安全
         assert!(validate_task_temp_dir(&format!("/{}", U1), "/").is_err());
         assert!(validate_task_temp_dir(&format!("/{}", U1), "").is_err());
@@ -345,7 +351,11 @@ mod tests {
 
         // 带尾斜杠的任务目录同样命中
         let mut set = HashSet::new();
-        protect_path(&mut set, "/.bpr_share_temp", &format!("/.bpr_share_temp/{}/", U1));
+        protect_path(
+            &mut set,
+            "/.bpr_share_temp",
+            &format!("/.bpr_share_temp/{}/", U1),
+        );
         assert!(set.contains(&format!("/.bpr_share_temp/{}", U1)));
     }
 
@@ -353,7 +363,11 @@ mod tests {
     fn test_protect_path_ignores_paths_outside_root() {
         let mut set = HashSet::new();
         protect_path(&mut set, "/.bpr_share_temp", "/电影/a.mp4");
-        protect_path(&mut set, "/.bpr_share_temp", &format!("/.bpr_share_temp2/{}", U1));
+        protect_path(
+            &mut set,
+            "/.bpr_share_temp",
+            &format!("/.bpr_share_temp2/{}", U1),
+        );
         assert!(set.is_empty());
     }
 
@@ -361,9 +375,18 @@ mod tests {
     fn test_classify_root_entry() {
         let own = Some("inst-abcdef012345");
         assert_eq!(classify_root_entry(U1, own), RootEntry::LegacyTask);
-        assert_eq!(classify_root_entry("inst-abcdef012345", own), RootEntry::OwnNamespace);
-        assert_eq!(classify_root_entry("inst-0123456789ab", own), RootEntry::ForeignNamespace);
-        assert_eq!(classify_root_entry("inst-0123456789ab", None), RootEntry::ForeignNamespace);
+        assert_eq!(
+            classify_root_entry("inst-abcdef012345", own),
+            RootEntry::OwnNamespace
+        );
+        assert_eq!(
+            classify_root_entry("inst-0123456789ab", own),
+            RootEntry::ForeignNamespace
+        );
+        assert_eq!(
+            classify_root_entry("inst-0123456789ab", None),
+            RootEntry::ForeignNamespace
+        );
         assert_eq!(classify_root_entry("我的资源", own), RootEntry::Other);
         assert_eq!(classify_root_entry("inst-", own), RootEntry::Other);
     }
@@ -376,15 +399,32 @@ mod tests {
         // 已结束但仍在宽限期
         assert!(transfer_protects_temp_dir(true, now - 60, now));
         // 已结束且超过宽限期
-        assert!(!transfer_protects_temp_dir(true, now - TERMINAL_GRACE_SECS, now));
+        assert!(!transfer_protects_temp_dir(
+            true,
+            now - TERMINAL_GRACE_SECS,
+            now
+        ));
     }
 
     #[test]
     fn test_is_finished_transfer_status() {
-        for s in ["completed", "transfer_failed", "download_failed", "TransferFailed", "DownloadFailed"] {
+        for s in [
+            "completed",
+            "transfer_failed",
+            "download_failed",
+            "TransferFailed",
+            "DownloadFailed",
+        ] {
             assert!(is_finished_transfer_status(s), "{}", s);
         }
-        for s in ["transferred", "downloading", "cleaning", "transferring", "checking_share", "queued"] {
+        for s in [
+            "transferred",
+            "downloading",
+            "cleaning",
+            "transferring",
+            "checking_share",
+            "queued",
+        ] {
             assert!(!is_finished_transfer_status(s), "{}", s);
         }
     }

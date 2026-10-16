@@ -281,7 +281,8 @@ impl CrossAccountRegistry {
     }
 
     async fn ledger_remove(&self, shareid: u64) {
-        self.ledger_modify(|v| v.retain(|e| e.shareid != shareid)).await;
+        self.ledger_modify(|v| v.retain(|e| e.shareid != shareid))
+            .await;
     }
 }
 
@@ -391,7 +392,8 @@ async fn run_job(state: AppState, job: CrossAccountJob) {
     if job.mode == CrossAccountMode::Download && status == TransferStatus::Transferred {
         registry.warn(
             &id,
-            "没有创建任何下载任务：所选文件可能已存在于本地下载目录，或下载任务创建失败".to_string(),
+            "没有创建任何下载任务：所选文件可能已存在于本地下载目录，或下载任务创建失败"
+                .to_string(),
         );
     }
 
@@ -400,13 +402,19 @@ async fn run_job(state: AppState, job: CrossAccountJob) {
     //    transferred_count 也为 0），计数不可靠；直接比对目标网盘里的实际结果。
     if job.mode == CrossAccountMode::Move {
         if transfer_warning.is_some() {
-            registry.warn(&id, "存在未转存成功的文件，已保留全部源文件，请核对后手动删除".to_string());
+            registry.warn(
+                &id,
+                "存在未转存成功的文件，已保留全部源文件，请核对后手动删除".to_string(),
+            );
         } else {
             registry.set_stage(&id, CrossAccountStage::Verifying);
             match verify_target(&state, source, target, &items, &job.target_dir).await {
                 Err(msg) => registry.warn(
                     &id,
-                    format!("目标文件校验未通过：{}。已保留全部源文件，请核对后手动删除", msg),
+                    format!(
+                        "目标文件校验未通过：{}。已保留全部源文件，请核对后手动删除",
+                        msg
+                    ),
                 ),
                 Ok(()) => {
                     registry.set_stage(&id, CrossAccountStage::DeletingSource);
@@ -414,7 +422,10 @@ async fn run_job(state: AppState, job: CrossAccountJob) {
                         Ok(()) => registry.update(&id, |j| j.source_deleted = true),
                         Err(msg) => registry.warn(
                             &id,
-                            format!("文件已复制到目标账号，但删除源文件失败：{}。请手动删除源文件", msg),
+                            format!(
+                                "文件已复制到目标账号，但删除源文件失败：{}。请手动删除源文件",
+                                msg
+                            ),
                         ),
                     }
                 }
@@ -530,7 +541,10 @@ async fn check_target_conflicts(
         .await
         .map_err(|e| format!("读取目标目录失败：{}", e))?
         .ok_or_else(|| format!("目标目录不存在：{}", target_dir))?;
-    let names: HashSet<&str> = existing.iter().map(|f| f.server_filename.as_str()).collect();
+    let names: HashSet<&str> = existing
+        .iter()
+        .map(|f| f.server_filename.as_str())
+        .collect();
     let conflicts = conflicting_names(items, &names);
     if !conflicts.is_empty() {
         return Err(format!(
@@ -558,7 +572,10 @@ async fn summarize_dir(
     let mut queue = VecDeque::from([root.to_string()]);
     while let Some(dir) = queue.pop_front() {
         if *budget == 0 {
-            return Err(format!("目录过多（超过 {} 个），无法完成核对", VERIFY_MAX_DIRS));
+            return Err(format!(
+                "目录过多（超过 {} 个），无法完成核对",
+                VERIFY_MAX_DIRS
+            ));
         }
         *budget -= 1;
         let entries = list_all_dir_entries(client, &dir)
@@ -589,8 +606,10 @@ async fn verify_target(
     let existing = list_dir(state, target, target_dir)
         .await?
         .ok_or_else(|| format!("目标目录不存在：{}", target_dir))?;
-    let by_name: HashMap<&str, &FileItem> =
-        existing.iter().map(|f| (f.server_filename.as_str(), f)).collect();
+    let by_name: HashMap<&str, &FileItem> = existing
+        .iter()
+        .map(|f| (f.server_filename.as_str(), f))
+        .collect();
 
     let (mut src_budget, mut dst_budget) = (VERIFY_MAX_DIRS, VERIFY_MAX_DIRS);
     for item in items {
@@ -607,8 +626,14 @@ async fn verify_target(
             )
         } else {
             (
-                TreeSummary { files: 1, bytes: item.size },
-                TreeSummary { files: 1, bytes: t.size },
+                TreeSummary {
+                    files: 1,
+                    bytes: item.size,
+                },
+                TreeSummary {
+                    files: 1,
+                    bytes: t.size,
+                },
             )
         };
         if s != d {
@@ -677,7 +702,11 @@ fn share_set_error_message(errno: i32, errmsg: &str) -> String {
 /// 转存阶段结果：`Ok((结束时的状态, 部分失败说明))`，`Err` 为整体失败
 type TransferOutcome = Result<(TransferStatus, Option<String>), String>;
 
-fn build_transfer_request(job: &CrossAccountJob, share_url: &str, pwd: &str) -> CreateTransferRequest {
+fn build_transfer_request(
+    job: &CrossAccountJob,
+    share_url: &str,
+    pwd: &str,
+) -> CreateTransferRequest {
     let base = CreateTransferRequest {
         share_url: share_url.to_string(),
         password: Some(pwd.to_string()),
@@ -718,10 +747,17 @@ fn build_transfer_request(job: &CrossAccountJob, share_url: &str, pwd: &str) -> 
 ///
 /// `DownloadFailed` 只会在下载开始之后出现，说明转存本身已成功，归入 `Ok`，
 /// 由调用方按「下载失败」处理（此时 error 是下载错误，不是转存的部分失败说明）
-fn transfer_phase_outcome(status: &TransferStatus, error: Option<String>) -> Option<TransferOutcome> {
+fn transfer_phase_outcome(
+    status: &TransferStatus,
+    error: Option<String>,
+) -> Option<TransferOutcome> {
     match status {
-        TransferStatus::Queued | TransferStatus::CheckingShare | TransferStatus::Transferring => None,
-        TransferStatus::TransferFailed => Some(Err(error.unwrap_or_else(|| "转存失败".to_string()))),
+        TransferStatus::Queued | TransferStatus::CheckingShare | TransferStatus::Transferring => {
+            None
+        }
+        TransferStatus::TransferFailed => {
+            Some(Err(error.unwrap_or_else(|| "转存失败".to_string())))
+        }
         TransferStatus::Transferred
         | TransferStatus::Downloading
         | TransferStatus::DownloadFailed
@@ -739,7 +775,10 @@ async fn transfer_into_target(
     let Some(tm) = state.transfer_manager_for(Uid::new(job.target_uid)) else {
         return Err("目标账号转存管理器未初始化，请重新登录目标账号".into());
     };
-    let task_id = match tm.create_task(build_transfer_request(job, share_url, pwd)).await {
+    let task_id = match tm
+        .create_task(build_transfer_request(job, share_url, pwd))
+        .await
+    {
         Ok(resp) => match (resp.task_id, resp.error) {
             (_, Some(err)) => return Err(format!("转存失败：{}", err)),
             (Some(id), None) => id,
@@ -876,7 +915,8 @@ mod tests {
 
     fn temp_registry() -> (tempfile::TempDir, CrossAccountRegistry) {
         let dir = tempfile::tempdir().unwrap();
-        let reg = CrossAccountRegistry::with_ledger_path(dir.path().join("cfg").join("ledger.json"));
+        let reg =
+            CrossAccountRegistry::with_ledger_path(dir.path().join("cfg").join("ledger.json"));
         (dir, reg)
     }
 
@@ -920,7 +960,11 @@ mod tests {
         let stale_done = mk(CrossAccountStage::Completed, FINISHED_JOB_TTL_SECS + 10);
         let fresh_done = mk(CrossAccountStage::Failed, 10);
         let old_running = mk(CrossAccountStage::Transferring, FINISHED_JOB_TTL_SECS + 10);
-        let (a, b, c) = (stale_done.id.clone(), fresh_done.id.clone(), old_running.id.clone());
+        let (a, b, c) = (
+            stale_done.id.clone(),
+            fresh_done.id.clone(),
+            old_running.id.clone(),
+        );
         reg.insert(stale_done);
         reg.insert(fresh_done);
         reg.insert(old_running);
@@ -974,7 +1018,12 @@ mod tests {
         assert_eq!(v["source_deleted"], false);
         assert!(v["local_download_path"].is_null());
 
-        let d = CrossAccountJob::new_download(Uid::new(1), Uid::new(2), vec!["/a".into()], "D:/dl".into());
+        let d = CrossAccountJob::new_download(
+            Uid::new(1),
+            Uid::new(2),
+            vec!["/a".into()],
+            "D:/dl".into(),
+        );
         let v = serde_json::to_value(&d).unwrap();
         assert_eq!(v["mode"], "download");
         assert_eq!(v["target_dir"], "");
@@ -987,8 +1036,17 @@ mod tests {
         for s in [Queued, CheckingShare, Transferring] {
             assert!(transfer_phase_outcome(&s, None).is_none(), "{:?}", s);
         }
-        for s in [Transferred, Downloading, DownloadFailed, Cleaning, Completed] {
-            assert_eq!(transfer_phase_outcome(&s, None), Some(Ok((s.clone(), None))));
+        for s in [
+            Transferred,
+            Downloading,
+            DownloadFailed,
+            Cleaning,
+            Completed,
+        ] {
+            assert_eq!(
+                transfer_phase_outcome(&s, None),
+                Some(Ok((s.clone(), None)))
+            );
         }
         assert_eq!(
             transfer_phase_outcome(&Downloading, Some("2 个失败".into())),
@@ -998,7 +1056,10 @@ mod tests {
             transfer_phase_outcome(&TransferFailed, Some("空间不足".into())),
             Some(Err("空间不足".into()))
         );
-        assert_eq!(transfer_phase_outcome(&TransferFailed, None), Some(Err("转存失败".into())));
+        assert_eq!(
+            transfer_phase_outcome(&TransferFailed, None),
+            Some(Err("转存失败".into()))
+        );
     }
 
     #[test]
@@ -1015,11 +1076,19 @@ mod tests {
         assert!(!req.is_share_direct_download);
         assert_eq!(req.auto_download, Some(false));
         assert_eq!(req.save_path, "/dst");
-        assert_eq!(req.backup_config_id, Some(format!("{}{}", INTERNAL_CONFIG_PREFIX, copy.id)));
+        assert_eq!(
+            req.backup_config_id,
+            Some(format!("{}{}", INTERNAL_CONFIG_PREFIX, copy.id))
+        );
         assert_eq!(req.owner_uid_override, Some(Uid::new(2)));
         assert_eq!(req.password.as_deref(), Some("abcd"));
 
-        let dl = CrossAccountJob::new_download(Uid::new(1), Uid::new(2), vec!["/a".into()], "D:/dl".into());
+        let dl = CrossAccountJob::new_download(
+            Uid::new(1),
+            Uid::new(2),
+            vec!["/a".into()],
+            "D:/dl".into(),
+        );
         let req = build_transfer_request(&dl, "https://pan.baidu.com/s/1x", "abcd");
         assert!(!req.is_internal);
         assert!(req.is_share_direct_download);

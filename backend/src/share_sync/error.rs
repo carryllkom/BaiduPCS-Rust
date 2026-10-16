@@ -554,9 +554,7 @@ mod tests {
         assert!(e.is_already_exists());
 
         // 文件/目录类型冲突 = 真实失败,不能当「已存在可继续」
-        let e = ShareSyncError::TransferError(
-            "目标路径已存在同名目录，无法用文件覆盖: /x".into(),
-        );
+        let e = ShareSyncError::TransferError("目标路径已存在同名目录，无法用文件覆盖: /x".into());
         assert!(!e.is_already_exists());
         // 无关错误
         let e = ShareSyncError::TransferError("errno=132 风控".into());
@@ -616,10 +614,7 @@ mod tests {
         // 同名冲突 → 视为「网盘里已有」，不是失败
         for errno in [-8, -30, 31061] {
             let e = ShareSyncError::TransferError(describe_transfer_errno(errno, ""));
-            assert!(
-                e.is_already_exists(),
-                "errno={errno} 应识别为已存在: {e}"
-            );
+            assert!(e.is_already_exists(), "errno={errno} 应识别为已存在: {e}");
             assert!(!e.is_bisect_trigger(), "errno={errno} 不该触发二分");
         }
     }

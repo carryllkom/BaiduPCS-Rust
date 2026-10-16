@@ -222,7 +222,10 @@ mod tests {
         calc.add_sample_at(1024 * 1024, start + Duration::from_millis(500));
         calc.add_sample_at(1024 * 1024, start + Duration::from_secs(1));
 
-        assert_eq!(calc.speed_at(start + Duration::from_secs(1)), 2 * 1024 * 1024);
+        assert_eq!(
+            calc.speed_at(start + Duration::from_secs(1)),
+            2 * 1024 * 1024
+        );
     }
 
     /// 跨度不足一个测量周期时报 0，不外推。

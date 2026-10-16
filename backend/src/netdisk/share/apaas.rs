@@ -41,10 +41,7 @@ const PARTIAL_FAILURE_ERRNO: i64 = 12;
 
 /// 企业版接口的公共 query 串（与前端 axios 默认参数一致）
 fn common_query() -> String {
-    format!(
-        "clienttype=0&web=1&channel=chunlei&app_id={}",
-        BAIDU_APP_ID
-    )
+    format!("clienttype=0&web=1&channel=chunlei&app_id={}", BAIDU_APP_ID)
 }
 
 /// 企业版分享页的 Referer
@@ -364,8 +361,7 @@ impl ShareProvider for ApaasShare {
 
         let raw = extract_json_object_after(&body, "window.yunData")
             .context("企业版分享页面未找到 yunData，链接可能已失效或不是企业版分享")?;
-        let data: Value =
-            serde_json::from_str(&raw).context("解析企业版分享页面 yunData 失败")?;
+        let data: Value = serde_json::from_str(&raw).context("解析企业版分享页面 yunData 失败")?;
 
         let share_info = &data["shareInfo"];
         let errno = share_info["errno"].as_i64().unwrap_or(-1);
@@ -440,8 +436,7 @@ impl ShareProvider for ApaasShare {
             .await?;
 
         debug!("企业版验证提取码响应: {}", body);
-        let json: Value =
-            serde_json::from_str(&body).context("解析企业版验证提取码响应失败")?;
+        let json: Value = serde_json::from_str(&body).context("解析企业版验证提取码响应失败")?;
 
         // 外层信封 + 内层 data 都有 errno，内层才是提取码校验结果
         check_errno(&json, "企业版验证提取码")?;
@@ -489,11 +484,7 @@ impl ShareProvider for ApaasShare {
 
         let uk = common::json_str_or_num(&data["uk"]).unwrap_or_default();
 
-        info!(
-            "企业版根目录: {} 个文件/文件夹, uk={}",
-            files.len(),
-            uk
-        );
+        info!("企业版根目录: {} 个文件/文件夹, uk={}", files.len(), uk);
 
         Ok(ShareFileListResult {
             files,
@@ -513,7 +504,9 @@ impl ShareProvider for ApaasShare {
         num: u32,
         token: Option<&str>,
     ) -> Result<Vec<SharedFileInfo>> {
-        let json = self.request_list(client, info, dir, page, num, token).await?;
+        let json = self
+            .request_list(client, info, dir, page, num, token)
+            .await?;
 
         let files = json["data"]["list"]
             .as_array()
@@ -609,7 +602,9 @@ impl ShareProvider for ApaasShare {
                 internal_task_id.unwrap_or("N/A"),
                 target_path
             );
-            return self.query_task(client, info, &task_id, internal_task_id).await;
+            return self
+                .query_task(client, info, &task_id, internal_task_id)
+                .await;
         }
 
         // 同步返回：结果列表位置与异步分支一致（desc.list 优先）
@@ -618,8 +613,9 @@ impl ShareProvider for ApaasShare {
             .or_else(|| json["desc"]["list"].as_array())
             .or_else(|| json["data"]["list"].as_array())
             .or_else(|| json["list"].as_array());
-        let (transferred_paths, from_paths, _) =
-            list.map(|l| common::collect_transfer_entries(l)).unwrap_or_default();
+        let (transferred_paths, from_paths, _) = list
+            .map(|l| common::collect_transfer_entries(l))
+            .unwrap_or_default();
 
         // 同样没有 to_fs_id，按路径回查补齐
         let transferred_fs_ids = resolve_fs_ids_by_path(client, &transferred_paths).await;
@@ -674,8 +670,7 @@ impl ApaasShare {
             .await?;
 
         debug!("企业版文件列表响应: {}", body);
-        let json: Value =
-            serde_json::from_str(&body).context("解析企业版文件列表响应失败")?;
+        let json: Value = serde_json::from_str(&body).context("解析企业版文件列表响应失败")?;
         check_errno(&json, "获取企业版分享文件列表")?;
         Ok(json)
     }
@@ -715,8 +710,7 @@ impl ApaasShare {
                 .await?;
 
             debug!("企业版任务查询响应 (尝试 {}): {}", attempt, body);
-            let json: Value =
-                serde_json::from_str(&body).context("解析企业版任务查询响应失败")?;
+            let json: Value = serde_json::from_str(&body).context("解析企业版任务查询响应失败")?;
 
             check_errno(&json, "企业版任务查询")?;
 
@@ -854,7 +848,11 @@ mod tests {
         let map: std::collections::HashMap<_, _> = form.iter().cloned().collect();
 
         // 绝不能出现 data 这个包装层
-        assert!(!map.contains_key("data"), "字段被错误地包进了 data: {:?}", map);
+        assert!(
+            !map.contains_key("data"),
+            "字段被错误地包进了 data: {:?}",
+            map
+        );
 
         // 数组单独 JSON 化
         assert_eq!(map["fsid_list"], r#"["250200452845377","2804215504560"]"#);
@@ -915,7 +913,10 @@ mod tests {
         // 只有前缀没有子路径 → 分享根
         assert_eq!(normalize_dir("/sharelink1644665781-13606518782"), "");
         // 企业版原生路径原样通过
-        assert_eq!(normalize_dir("/夫君背叛，局中方醒  首发12集"), "/夫君背叛，局中方醒  首发12集");
+        assert_eq!(
+            normalize_dir("/夫君背叛，局中方醒  首发12集"),
+            "/夫君背叛，局中方醒  首发12集"
+        );
         assert_eq!(normalize_dir(""), "");
         assert_eq!(normalize_dir("/"), "/");
         // 名字碰巧以 sharelink 开头的真实目录不能被误剥

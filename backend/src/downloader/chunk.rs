@@ -212,8 +212,7 @@ impl Chunk {
         // 🔥 校验 Content-Range 头（防止 CDN 返回错误的字节范围）
         if let Some(content_range) = resp.headers().get("content-range") {
             if let Ok(cr_str) = content_range.to_str() {
-                let expected_prefix =
-                    format!("bytes {}-{}", effective_start, self.range.end - 1);
+                let expected_prefix = format!("bytes {}-{}", effective_start, self.range.end - 1);
                 if !cr_str.starts_with(&expected_prefix) {
                     anyhow::bail!(
                         "Content-Range 不匹配: 期望以 '{}' 开头，实际 '{}'",
@@ -254,8 +253,7 @@ impl Chunk {
         let mut total_bytes_downloaded = 0u64;
         let mut pending_progress = 0u64; // 累积的待更新字节数
         const PROGRESS_UPDATE_THRESHOLD: u64 = 256 * 1024; // 每256KB更新一次进度（减少锁竞争）
-        const PROGRESS_UPDATE_INTERVAL: std::time::Duration =
-            std::time::Duration::from_millis(500);
+        const PROGRESS_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
         let mut last_progress_update = std::time::Instant::now();
         // 🔥 读取超时：防止CDN连接挂起导致分片线程永久卡死
         // 当服务端返回headers后数据流停止时，reqwest的全局timeout不会生效，
@@ -329,7 +327,9 @@ impl Chunk {
                     chunk_thread_id, self.index, total_bytes_downloaded, chunk_len, remaining, safe_len
                 );
                 if safe_len > 0 {
-                    file.write_all(&chunk_data[..safe_len]).await.context("写入文件失败")?;
+                    file.write_all(&chunk_data[..safe_len])
+                        .await
+                        .context("写入文件失败")?;
                     total_bytes_downloaded += safe_len as u64;
                     pending_progress += safe_len as u64;
                 }
@@ -363,7 +363,9 @@ impl Chunk {
             self.bytes_downloaded += total_bytes_downloaded;
             anyhow::bail!(
                 "分片 #{} 数据不完整: 期望 {} bytes，实际收到 {} bytes (差 {} bytes)",
-                self.index, remaining, total_bytes_downloaded,
+                self.index,
+                remaining,
+                total_bytes_downloaded,
                 remaining - total_bytes_downloaded
             );
         }
@@ -644,7 +646,10 @@ impl ChunkManager {
 
     /// 获取分片的已下载字节数（分片内断点续传持久化）
     pub fn get_bytes_downloaded(&self, index: usize) -> u64 {
-        self.chunks.get(index).map(|c| c.bytes_downloaded).unwrap_or(0)
+        self.chunks
+            .get(index)
+            .map(|c| c.bytes_downloaded)
+            .unwrap_or(0)
     }
 
     /// 重置所有分片状态

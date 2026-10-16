@@ -169,18 +169,36 @@ impl HistoryDbManager {
         )?;
 
         // 兼容旧数据库：添加新列（已存在则忽略）
-        let _ = conn.execute("ALTER TABLE task_history ADD COLUMN file_list_json TEXT", []);
-        let _ = conn.execute("ALTER TABLE task_history ADD COLUMN is_share_direct_download INTEGER", []);
+        let _ = conn.execute(
+            "ALTER TABLE task_history ADD COLUMN file_list_json TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE task_history ADD COLUMN is_share_direct_download INTEGER",
+            [],
+        );
         let _ = conn.execute("ALTER TABLE task_history ADD COLUMN temp_dir TEXT", []);
-        let _ = conn.execute("ALTER TABLE task_history ADD COLUMN cleanup_status TEXT", []);
-        let _ = conn.execute("ALTER TABLE task_history ADD COLUMN share_root_path TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE task_history ADD COLUMN cleanup_status TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE task_history ADD COLUMN share_root_path TEXT",
+            [],
+        );
         // 🔥 多账号归属 — sqlite history 表也要支持 owner_uid，
         // 否则 row_to_task_metadata 永远返回 None，前端 DownloadsView/UploadsView 显示 UID:0
         let _ = conn.execute("ALTER TABLE task_history ADD COLUMN owner_uid INTEGER", []);
-        let _ = conn.execute("ALTER TABLE folder_history ADD COLUMN owner_uid INTEGER", []);
+        let _ = conn.execute(
+            "ALTER TABLE folder_history ADD COLUMN owner_uid INTEGER",
+            [],
+        );
         // 🔥 分享同步：文件夹下载也需要 backup_config_id 归属，否则重启后
         // 内部隐藏文件夹会退回 None 而重新泄漏进「下载管理」。
-        let _ = conn.execute("ALTER TABLE folder_history ADD COLUMN backup_config_id TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE folder_history ADD COLUMN backup_config_id TEXT",
+            [],
+        );
         // 🔥 跳过统计与明细：已完成的文件夹归档到本表后，重启会从这里加载。
         //    不建列就会丢掉「跳过了几个/多少字节/哪些文件」，表现为重启后进度回到 0%、
         //    详情里的跳过行全部消失（issue #141 用户反馈）。
@@ -357,8 +375,14 @@ impl HistoryDbManager {
                     metadata.completed_at.map(|t| t.timestamp()),
                     metadata.fs_id.map(|id| id as i64),
                     metadata.remote_path,
-                    metadata.local_path.as_ref().map(|p| p.to_string_lossy().to_string()),
-                    metadata.source_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+                    metadata
+                        .local_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string()),
+                    metadata
+                        .source_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string()),
                     metadata.target_path,
                     metadata.upload_id,
                     metadata.share_link,
@@ -379,9 +403,13 @@ impl HistoryDbManager {
                     metadata.transfer_task_id,
                     download_task_ids,
                     metadata.file_list_json,
-                    metadata.is_share_direct_download.map(|b| if b { 1 } else { 0 }),
+                    metadata
+                        .is_share_direct_download
+                        .map(|b| if b { 1 } else { 0 }),
                     metadata.temp_dir,
-                    metadata.cleanup_status.and_then(|s| serde_json::to_value(s).ok().and_then(|v| v.as_str().map(String::from))),
+                    metadata.cleanup_status.and_then(|s| serde_json::to_value(s)
+                        .ok()
+                        .and_then(|v| v.as_str().map(String::from))),
                     metadata.share_root_path,
                     // 🔥 多账号归属：Some(0) 也当作 None 写入
                     metadata.owner_uid.filter(|u| *u != 0).map(|u| u as i64),
@@ -584,11 +612,8 @@ impl HistoryDbManager {
             .map_err(|e| anyhow!("获取数据库锁失败: {}", e))?;
 
         // 获取总数
-        let total: usize = conn.query_row(
-            "SELECT COUNT(*) FROM task_history",
-            [],
-            |row| row.get(0),
-        )?;
+        let total: usize =
+            conn.query_row("SELECT COUNT(*) FROM task_history", [], |row| row.get(0))?;
 
         // 获取分页数据
         let mut stmt = conn.prepare(
@@ -712,45 +737,48 @@ impl HistoryDbManager {
             "#,
         )?;
 
-        let rows = stmt.query_map(params![task_type, status, limit as i64, offset as i64], |row| {
-            Ok(TaskHistoryRow {
-                task_id: row.get(0)?,
-                task_type: row.get(1)?,
-                status: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-                completed_at: row.get(5)?,
-                fs_id: row.get(6)?,
-                remote_path: row.get(7)?,
-                local_path: row.get(8)?,
-                source_path: row.get(9)?,
-                target_path: row.get(10)?,
-                upload_id: row.get(11)?,
-                share_link: row.get(12)?,
-                share_pwd: row.get(13)?,
-                transfer_target_path: row.get(14)?,
-                transfer_status: row.get(15)?,
-                transfer_file_name: row.get(16)?,
-                auto_download: row.get(17)?,
-                file_list_json: row.get(18)?,
-                is_share_direct_download: row.get(19)?,
-                file_size: row.get(20)?,
-                chunk_size: row.get(21)?,
-                total_chunks: row.get(22)?,
-                error_msg: row.get(23)?,
-                group_id: row.get(24)?,
-                group_root: row.get(25)?,
-                relative_path: row.get(26)?,
-                is_backup: row.get(27)?,
-                backup_config_id: row.get(28)?,
-                transfer_task_id: row.get(29)?,
-                download_task_ids: row.get(30)?,
-                temp_dir: row.get(31)?,
-                cleanup_status: row.get(32)?,
-                share_root_path: row.get(33)?,
-                owner_uid: row.get(34)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![task_type, status, limit as i64, offset as i64],
+            |row| {
+                Ok(TaskHistoryRow {
+                    task_id: row.get(0)?,
+                    task_type: row.get(1)?,
+                    status: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    completed_at: row.get(5)?,
+                    fs_id: row.get(6)?,
+                    remote_path: row.get(7)?,
+                    local_path: row.get(8)?,
+                    source_path: row.get(9)?,
+                    target_path: row.get(10)?,
+                    upload_id: row.get(11)?,
+                    share_link: row.get(12)?,
+                    share_pwd: row.get(13)?,
+                    transfer_target_path: row.get(14)?,
+                    transfer_status: row.get(15)?,
+                    transfer_file_name: row.get(16)?,
+                    auto_download: row.get(17)?,
+                    file_list_json: row.get(18)?,
+                    is_share_direct_download: row.get(19)?,
+                    file_size: row.get(20)?,
+                    chunk_size: row.get(21)?,
+                    total_chunks: row.get(22)?,
+                    error_msg: row.get(23)?,
+                    group_id: row.get(24)?,
+                    group_root: row.get(25)?,
+                    relative_path: row.get(26)?,
+                    is_backup: row.get(27)?,
+                    backup_config_id: row.get(28)?,
+                    transfer_task_id: row.get(29)?,
+                    download_task_ids: row.get(30)?,
+                    temp_dir: row.get(31)?,
+                    cleanup_status: row.get(32)?,
+                    share_root_path: row.get(33)?,
+                    owner_uid: row.get(34)?,
+                })
+            },
+        )?;
 
         let mut tasks = Vec::new();
         for row in rows {
@@ -805,7 +833,9 @@ impl HistoryDbManager {
             .map_err(|e| anyhow!("获取数据库锁失败: {}", e))?;
 
         let mut stmt = conn.prepare("SELECT folder_id, status FROM folder_history")?;
-        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
@@ -833,14 +863,19 @@ impl HistoryDbManager {
             .lock()
             .map_err(|e| anyhow!("获取数据库锁失败: {}", e))?;
 
-        let backup_filter = if exclude_backup { "AND is_backup = 0" } else { "" };
+        let backup_filter = if exclude_backup {
+            "AND is_backup = 0"
+        } else {
+            ""
+        };
 
         // 获取总数
         let count_sql = format!(
             "SELECT COUNT(*) FROM task_history WHERE task_type = ?1 AND status = ?2 {}",
             backup_filter
         );
-        let total: usize = conn.query_row(&count_sql, params![task_type, status], |row| row.get(0))?;
+        let total: usize =
+            conn.query_row(&count_sql, params![task_type, status], |row| row.get(0))?;
 
         // 获取分页数据
         let query_sql = format!(
@@ -864,45 +899,48 @@ impl HistoryDbManager {
         );
 
         let mut stmt = conn.prepare(&query_sql)?;
-        let rows = stmt.query_map(params![task_type, status, limit as i64, offset as i64], |row| {
-            Ok(TaskHistoryRow {
-                task_id: row.get(0)?,
-                task_type: row.get(1)?,
-                status: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-                completed_at: row.get(5)?,
-                fs_id: row.get(6)?,
-                remote_path: row.get(7)?,
-                local_path: row.get(8)?,
-                source_path: row.get(9)?,
-                target_path: row.get(10)?,
-                upload_id: row.get(11)?,
-                share_link: row.get(12)?,
-                share_pwd: row.get(13)?,
-                transfer_target_path: row.get(14)?,
-                transfer_status: row.get(15)?,
-                transfer_file_name: row.get(16)?,
-                auto_download: row.get(17)?,
-                file_list_json: row.get(18)?,
-                is_share_direct_download: row.get(19)?,
-                file_size: row.get(20)?,
-                chunk_size: row.get(21)?,
-                total_chunks: row.get(22)?,
-                error_msg: row.get(23)?,
-                group_id: row.get(24)?,
-                group_root: row.get(25)?,
-                relative_path: row.get(26)?,
-                is_backup: row.get(27)?,
-                backup_config_id: row.get(28)?,
-                transfer_task_id: row.get(29)?,
-                download_task_ids: row.get(30)?,
-                temp_dir: row.get(31)?,
-                cleanup_status: row.get(32)?,
-                share_root_path: row.get(33)?,
-                owner_uid: row.get(34)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![task_type, status, limit as i64, offset as i64],
+            |row| {
+                Ok(TaskHistoryRow {
+                    task_id: row.get(0)?,
+                    task_type: row.get(1)?,
+                    status: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    completed_at: row.get(5)?,
+                    fs_id: row.get(6)?,
+                    remote_path: row.get(7)?,
+                    local_path: row.get(8)?,
+                    source_path: row.get(9)?,
+                    target_path: row.get(10)?,
+                    upload_id: row.get(11)?,
+                    share_link: row.get(12)?,
+                    share_pwd: row.get(13)?,
+                    transfer_target_path: row.get(14)?,
+                    transfer_status: row.get(15)?,
+                    transfer_file_name: row.get(16)?,
+                    auto_download: row.get(17)?,
+                    file_list_json: row.get(18)?,
+                    is_share_direct_download: row.get(19)?,
+                    file_size: row.get(20)?,
+                    chunk_size: row.get(21)?,
+                    total_chunks: row.get(22)?,
+                    error_msg: row.get(23)?,
+                    group_id: row.get(24)?,
+                    group_root: row.get(25)?,
+                    relative_path: row.get(26)?,
+                    is_backup: row.get(27)?,
+                    backup_config_id: row.get(28)?,
+                    transfer_task_id: row.get(29)?,
+                    download_task_ids: row.get(30)?,
+                    temp_dir: row.get(31)?,
+                    cleanup_status: row.get(32)?,
+                    share_root_path: row.get(33)?,
+                    owner_uid: row.get(34)?,
+                })
+            },
+        )?;
 
         let mut tasks = Vec::new();
         for row in rows {
@@ -1424,10 +1462,7 @@ impl HistoryDbManager {
             .lock()
             .map_err(|e| anyhow!("获取数据库锁失败: {}", e))?;
 
-        let deleted = conn.execute(
-            "DELETE FROM folder_history WHERE status = 'completed'",
-            [],
-        )?;
+        let deleted = conn.execute("DELETE FROM folder_history WHERE status = 'completed'", [])?;
 
         if deleted > 0 {
             info!("已从历史数据库中删除 {} 个已完成的文件夹", deleted);
@@ -1450,10 +1485,7 @@ impl HistoryDbManager {
                 "DELETE FROM folder_history WHERE status = 'completed' AND owner_uid = ?1",
                 params![uid as i64],
             )?,
-            None => conn.execute(
-                "DELETE FROM folder_history WHERE status = 'completed'",
-                [],
-            )?,
+            None => conn.execute("DELETE FROM folder_history WHERE status = 'completed'", [])?,
         };
 
         if deleted > 0 {
@@ -1557,8 +1589,14 @@ impl HistoryDbManager {
         Ok(TaskMetadata {
             task_id: row.task_id,
             task_type,
-            created_at: Utc.timestamp_opt(row.created_at, 0).single().unwrap_or_else(Utc::now),
-            updated_at: Utc.timestamp_opt(row.updated_at, 0).single().unwrap_or_else(Utc::now),
+            created_at: Utc
+                .timestamp_opt(row.created_at, 0)
+                .single()
+                .unwrap_or_else(Utc::now),
+            updated_at: Utc
+                .timestamp_opt(row.updated_at, 0)
+                .single()
+                .unwrap_or_else(Utc::now),
             fs_id: row.fs_id.map(|id| id as u64),
             transfer_task_id: row.transfer_task_id,
             remote_path: row.remote_path,
@@ -1582,14 +1620,18 @@ impl HistoryDbManager {
             // 分享直下字段
             is_share_direct_download: row.is_share_direct_download.map(|v| v != 0),
             temp_dir: row.temp_dir,
-            cleanup_status: row.cleanup_status.and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok()),
+            cleanup_status: row
+                .cleanup_status
+                .and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok()),
             // SQLite 历史镜像现已持久化分享根路径，恢复时与 WAL `.meta` 等价
             share_root_path: row.share_root_path,
             group_id: row.group_id,
             group_root: row.group_root,
             relative_path: row.relative_path,
             status,
-            completed_at: row.completed_at.and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
+            completed_at: row
+                .completed_at
+                .and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
             error_msg: row.error_msg,
             is_backup: row.is_backup.map(|v| v != 0).unwrap_or(false),
             backup_config_id: row.backup_config_id,
@@ -1758,7 +1800,6 @@ pub struct CloudDlAutoDownloadConfig {
     pub triggered_at: Option<i64>,
 }
 
-
 // ========================================================================
 // cloud_dl_auto_download 操作
 // ========================================================================
@@ -1866,7 +1907,10 @@ impl HistoryDbManager {
             }
         }
 
-        info!("从数据库加载了 {} 条待触发的离线下载自动下载配置", configs.len());
+        info!(
+            "从数据库加载了 {} 条待触发的离线下载自动下载配置",
+            configs.len()
+        );
         Ok(configs)
     }
 
@@ -1909,7 +1953,10 @@ impl HistoryDbManager {
     }
 
     /// 获取单个离线下载自动下载配置
-    pub fn get_cloud_dl_auto_download(&self, task_id: i64) -> Result<Option<CloudDlAutoDownloadConfig>> {
+    pub fn get_cloud_dl_auto_download(
+        &self,
+        task_id: i64,
+    ) -> Result<Option<CloudDlAutoDownloadConfig>> {
         let conn = self
             .conn
             .lock()
@@ -1941,7 +1988,10 @@ impl HistoryDbManager {
     }
 
     /// 清理已触发的离线下载自动下载配置（可选：保留最近 N 天的记录）
-    pub fn cleanup_triggered_cloud_dl_auto_download(&self, retention_days: Option<u64>) -> Result<usize> {
+    pub fn cleanup_triggered_cloud_dl_auto_download(
+        &self,
+        retention_days: Option<u64>,
+    ) -> Result<usize> {
         let conn = self
             .conn
             .lock()
@@ -1954,10 +2004,7 @@ impl HistoryDbManager {
                 params![cutoff],
             )?
         } else {
-            conn.execute(
-                "DELETE FROM cloud_dl_auto_download WHERE triggered = 1",
-                [],
-            )?
+            conn.execute("DELETE FROM cloud_dl_auto_download WHERE triggered = 1", [])?
         };
 
         if deleted > 0 {
@@ -2016,8 +2063,16 @@ mod tests {
             skipped_count: 4,
             skipped_size: 3_307_595,
             skipped_entries: vec![
-                SkippedFile { relative_path: "a.pdf".into(), size: 1, skipped_at: 1 },
-                SkippedFile { relative_path: "子目录/b.doc".into(), size: 2, skipped_at: 2 },
+                SkippedFile {
+                    relative_path: "a.pdf".into(),
+                    size: 1,
+                    skipped_at: 1,
+                },
+                SkippedFile {
+                    relative_path: "子目录/b.doc".into(),
+                    size: 2,
+                    skipped_at: 2,
+                },
             ],
         }
     }
@@ -2051,7 +2106,15 @@ mod tests {
 
         let download = |id: &str| {
             let mut m = TaskMetadata::new_download(
-                id.into(), 1, "/r".into(), "/l".into(), 10, 10, 1, None, None,
+                id.into(),
+                1,
+                "/r".into(),
+                "/l".into(),
+                10,
+                10,
+                1,
+                None,
+                None,
             );
             m.mark_completed();
             m
@@ -2063,7 +2126,14 @@ mod tests {
         let mut failed = download("d-failed");
         failed.mark_failed();
         let mut upload = TaskMetadata::new_upload(
-            "u-1".into(), "/l".into(), "/r".into(), 10, 10, 1, None, None,
+            "u-1".into(),
+            "/l".into(),
+            "/r".into(),
+            10,
+            10,
+            1,
+            None,
+            None,
         );
         upload.mark_completed();
         for m in [download("d-1"), grouped, backup, failed, upload] {
@@ -2080,7 +2150,12 @@ mod tests {
             db.list_recent_completed_task_ids("upload", 500).unwrap(),
             vec![("u-1".to_string(), false)]
         );
-        assert_eq!(db.list_recent_completed_task_ids("download", 1).unwrap().len(), 1);
+        assert_eq!(
+            db.list_recent_completed_task_ids("download", 1)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

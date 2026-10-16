@@ -129,7 +129,11 @@ impl FolderPersisted {
             backup_config_id: folder.backup_config_id.clone(),
             owner_uid: {
                 let raw = folder.owner_uid.raw();
-                if raw == 0 { None } else { Some(raw) }
+                if raw == 0 {
+                    None
+                } else {
+                    Some(raw)
+                }
             },
             failure_reason: folder.failure_reason.clone(),
             conflict_strategy: folder.conflict_strategy,
@@ -289,7 +293,10 @@ pub fn add_folder_to_history(wal_dir: &Path, folder: &FolderPersisted) -> std::i
 }
 
 /// 追加文件夹到历史文件
-fn append_folders_to_history_file(wal_dir: &Path, folders: &[FolderPersisted]) -> std::io::Result<()> {
+fn append_folders_to_history_file(
+    wal_dir: &Path,
+    folders: &[FolderPersisted],
+) -> std::io::Result<()> {
     let history_path = get_folder_history_path(wal_dir);
 
     let file = std::fs::OpenOptions::new()
@@ -366,7 +373,11 @@ pub fn load_folder_history_ids(wal_dir: &Path) -> std::io::Result<HashSet<String
         let line = match line_result {
             Ok(l) => l,
             Err(e) => {
-                warn!("读取文件 {} 时遇到 IO 错误，跳过该行: {}", history_path.display(), e);
+                warn!(
+                    "读取文件 {} 时遇到 IO 错误，跳过该行: {}",
+                    history_path.display(),
+                    e
+                );
                 continue;
             }
         };
@@ -396,7 +407,11 @@ pub fn remove_folder_from_history(wal_dir: &Path, folder_id: &str) -> std::io::R
         let line = match line_result {
             Ok(l) => l,
             Err(e) => {
-                warn!("读取文件 {} 时遇到 IO 错误，跳过该行: {}", history_path.display(), e);
+                warn!(
+                    "读取文件 {} 时遇到 IO 错误，跳过该行: {}",
+                    history_path.display(),
+                    e
+                );
                 continue;
             }
         };
@@ -488,7 +503,10 @@ pub fn archive_completed_folders(wal_dir: &Path) -> std::io::Result<usize> {
 }
 
 /// 清理过期的文件夹历史
-pub fn cleanup_expired_folder_history(wal_dir: &Path, retention_days: u64) -> std::io::Result<usize> {
+pub fn cleanup_expired_folder_history(
+    wal_dir: &Path,
+    retention_days: u64,
+) -> std::io::Result<usize> {
     let history_path = get_folder_history_path(wal_dir);
 
     if !history_path.exists() {
@@ -507,7 +525,11 @@ pub fn cleanup_expired_folder_history(wal_dir: &Path, retention_days: u64) -> st
         let line = match line_result {
             Ok(l) => l,
             Err(e) => {
-                warn!("读取文件 {} 时遇到 IO 错误，跳过该行: {}", history_path.display(), e);
+                warn!(
+                    "读取文件 {} 时遇到 IO 错误，跳过该行: {}",
+                    history_path.display(),
+                    e
+                );
                 continue;
             }
         };
@@ -558,7 +580,8 @@ mod tests {
 
     #[test]
     fn test_folder_persisted_conversion() {
-        let folder = FolderDownload::new("/test/folder".to_string(), PathBuf::from("/local/folder"));
+        let folder =
+            FolderDownload::new("/test/folder".to_string(), PathBuf::from("/local/folder"));
 
         let persisted = FolderPersisted::from_folder(&folder);
         assert_eq!(persisted.id, folder.id);
@@ -606,8 +629,7 @@ mod tests {
             "pending_files": [], "created_at": 0
         }"#;
 
-        let parsed: FolderPersisted =
-            serde_json::from_str(legacy).expect("旧快照应能继续解析");
+        let parsed: FolderPersisted = serde_json::from_str(legacy).expect("旧快照应能继续解析");
         assert_eq!(parsed.conflict_strategy, None);
     }
 
@@ -628,7 +650,10 @@ mod tests {
 
         save_folder(wal_dir, &FolderPersisted::from_folder(&folder)).unwrap();
 
-        let restored = load_folder(wal_dir, &folder.id).unwrap().unwrap().to_folder();
+        let restored = load_folder(wal_dir, &folder.id)
+            .unwrap()
+            .unwrap()
+            .to_folder();
         assert_eq!(
             restored.counted_fs_ids.len(),
             2,
@@ -649,8 +674,7 @@ mod tests {
             "pending_files": [], "created_at": 0
         }"#;
 
-        let parsed: FolderPersisted =
-            serde_json::from_str(legacy).expect("旧快照应能继续解析");
+        let parsed: FolderPersisted = serde_json::from_str(legacy).expect("旧快照应能继续解析");
         assert!(parsed.counted_fs_ids.is_empty());
     }
 

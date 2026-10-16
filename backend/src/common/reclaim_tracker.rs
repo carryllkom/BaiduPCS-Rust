@@ -123,7 +123,10 @@ mod tests {
         tracker.due(c(&[("a", 1)]), t0, TTL);
         let t1 = t0 + Duration::from_secs(1800);
         tracker.due(c(&[("a", 1), ("b", 1)]), t1, TTL);
-        assert_eq!(tracker.due(c(&[("a", 1), ("b", 1)]), t0 + TTL, TTL), ids(&["a"]));
+        assert_eq!(
+            tracker.due(c(&[("a", 1), ("b", 1)]), t0 + TTL, TTL),
+            ids(&["a"])
+        );
         assert_eq!(tracker.tracked(), 1);
         assert_eq!(tracker.due(c(&[("b", 1)]), t1 + TTL, TTL), ids(&["b"]));
     }
