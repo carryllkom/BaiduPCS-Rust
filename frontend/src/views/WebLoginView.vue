@@ -394,13 +394,6 @@ async function handleRecoverySubmit() {
   }
 }
 
-// 监听认证状态变化
-watch(() => webAuthStore.isAuthenticated, (isAuth) => {
-  if (isAuth) {
-    router.push('/login')
-  }
-})
-
 // 监听恢复码对话框打开
 watch(showRecoveryInput, (show) => {
   if (show) {
@@ -421,11 +414,9 @@ watch(() => webAuthStore.lockoutRemaining, (newVal) => {
 
 // 组件挂载
 onMounted(async () => {
-  // 初始化 store
-  webAuthStore.initialize()
-  
-  // 检查认证状态
+  // 检查认证状态（先等待 store 初始化完成，确保本地令牌已加载/刷新）
   try {
+    await webAuthStore.initialize()
     await webAuthStore.checkAuthStatus()
     
     // 如果认证未启用或已认证，跳转到登录页
