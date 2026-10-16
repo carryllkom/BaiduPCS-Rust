@@ -439,6 +439,10 @@ async fn main() -> anyhow::Result<()> {
             "/config/default-download-dir",
             post(handlers::set_default_download_dir),
         )
+        .route(
+            "/config/default-download-account",
+            post(handlers::set_default_download_account),
+        )
         // 转存配置API
         .route("/config/transfer", get(handlers::get_transfer_config))
         .route("/config/transfer", put(handlers::update_transfer_config))

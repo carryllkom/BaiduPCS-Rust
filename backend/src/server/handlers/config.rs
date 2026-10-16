@@ -729,6 +729,44 @@ pub async fn set_default_download_dir(
     Ok(Json(ApiResponse::success("默认下载目录已设置".to_string())))
 }
 
+/// 设置默认下载账号请求
+#[derive(Debug, Deserialize)]
+pub struct SetDefaultDownloadAccountRequest {
+    /// 账号 UID；`null` 表示取消默认
+    pub uid: Option<u64>,
+}
+
+/// POST /api/v1/config/default-download-account
+/// 设置「用其他账号下载」默认选中的账号
+pub async fn set_default_download_account(
+    State(app_state): State<crate::server::AppState>,
+    Json(req): Json<SetDefaultDownloadAccountRequest>,
+) -> ApiResult<Json<ApiResponse<String>>> {
+    info!("设置默认下载账号: {:?}", req.uid);
+
+    if let Some(uid) = req.uid {
+        let mgr = app_state.account_manager.lock().await;
+        if mgr.get_user(crate::auth::Uid::new(uid)).is_none() {
+            return Err(ApiError::BadRequest(format!(
+                "账号不存在或已移除: UID {}",
+                uid
+            )));
+        }
+    }
+
+    let mut config = app_state.config.read().await.clone();
+    config.download.default_download_account_uid = req.uid;
+
+    config
+        .save_to_file("config/app.toml")
+        .await
+        .map_err(ApiError::Internal)?;
+
+    *app_state.config.write().await = config;
+
+    Ok(Json(ApiResponse::success("默认下载账号已设置".to_string())))
+}
+
 // ============================================
 // 转存配置 API
 // ============================================

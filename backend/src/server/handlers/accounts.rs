@@ -16,7 +16,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
 // ============================================================================
 // DTO
@@ -255,6 +255,8 @@ pub async fn delete_account(
         .await
         .map_err(ApiError::Internal)?;
 
+    clear_default_download_account(&state, target_uid).await;
+
     // 读取最新 active_uid（force_delete_account 已通过 helper 完成切换）
     let new_active = {
         let mgr = state.account_manager.lock().await;
@@ -274,6 +276,19 @@ pub async fn delete_account(
         deleted_uid: target_uid.raw(),
         new_active_uid: new_active,
     }))
+}
+
+/// 被删账号是「用其他账号下载」的默认账号时清掉该配置；账号已删除，失败只记日志
+async fn clear_default_download_account(state: &AppState, uid: Uid) {
+    let mut config = state.config.read().await.clone();
+    if config.download.default_download_account_uid != Some(uid.raw()) {
+        return;
+    }
+    config.download.default_download_account_uid = None;
+    match config.save_to_file("config/app.toml").await {
+        Ok(_) => *state.config.write().await = config,
+        Err(e) => warn!("清除默认下载账号失败: uid={}, error={:#}", uid.raw(), e),
+    }
 }
 
 /// 🔥 扫描指定 uid 是否有运行中（非终态）任务
