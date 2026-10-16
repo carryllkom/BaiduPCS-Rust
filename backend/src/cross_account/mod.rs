@@ -684,19 +684,17 @@ async fn create_temp_share(
             }
             continue;
         }
-        return Err(share_set_error_message(resp.errno, &resp.errmsg));
+        return Err(share_set_error_message(&resp));
     }
 }
 
-fn share_set_error_message(errno: i32, errmsg: &str) -> String {
-    let reason = match errno {
+fn share_set_error_message(resp: &ShareSetResponse) -> String {
+    let reason = match resp.errno {
+        // 通用文案说的是「请重新登录」，跨账号场景要指明是源账号
         -6 => "源账号登录已过期或凭证不完整，请重新登录源账号".to_string(),
-        110 => "源账号今日分享次数已达上限".to_string(),
-        115 => "所选文件中有被百度禁止分享的文件".to_string(),
-        _ if errmsg.is_empty() => format!("errno={}", errno),
-        _ => format!("{}（errno={}）", errmsg, errno),
+        _ => resp.error_reason(),
     };
-    format!("创建临时分享失败：{}", reason)
+    format!("源账号创建临时分享失败：{}", reason)
 }
 
 /// 转存阶段结果：`Ok((结束时的状态, 部分失败说明))`，`Err` 为整体失败
@@ -997,10 +995,20 @@ mod tests {
 
     #[test]
     fn share_set_error_messages() {
-        assert!(share_set_error_message(115, "").contains("禁止分享"));
-        assert!(share_set_error_message(110, "").contains("上限"));
-        assert!(share_set_error_message(42, "boom").contains("boom（errno=42）"));
-        assert!(share_set_error_message(42, "").contains("errno=42"));
+        let resp = |errno: i32, errmsg: &str, show_msg: &str| ShareSetResponse {
+            errno,
+            link: String::new(),
+            pwd: String::new(),
+            shareid: 0,
+            errmsg: errmsg.to_string(),
+            show_msg: show_msg.to_string(),
+        };
+        assert!(share_set_error_message(&resp(-6, "", "")).contains("重新登录源账号"));
+        assert!(share_set_error_message(&resp(115, "", "")).contains("禁止分享"));
+        assert!(share_set_error_message(&resp(110, "", "")).contains("上限"));
+        assert!(share_set_error_message(&resp(42, "boom", "")).contains("boom（errno=42）"));
+        assert!(share_set_error_message(&resp(42, "", "")).contains("errno=42"));
+        assert!(share_set_error_message(&resp(42, "", "请先绑定手机号")).contains("请先绑定手机号"));
     }
 
     #[test]

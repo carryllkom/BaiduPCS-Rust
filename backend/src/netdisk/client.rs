@@ -3835,8 +3835,13 @@ impl NetdiskClient {
             status, response_text
         );
 
-        let share_response: crate::netdisk::ShareSetResponse =
-            serde_json::from_str(&response_text).context("解析分享响应失败")?;
+        let share_response: crate::netdisk::ShareSetResponse = serde_json::from_str(&response_text)
+            .with_context(|| {
+                format!(
+                    "解析分享响应失败（HTTP {}），百度返回了非预期的内容",
+                    status
+                )
+            })?;
 
         if share_response.is_success() {
             info!(
@@ -3845,8 +3850,8 @@ impl NetdiskClient {
             );
         } else {
             warn!(
-                "创建分享链接失败: errno={}, errmsg={}",
-                share_response.errno, share_response.errmsg
+                "创建分享链接失败: errno={}, errmsg={}, show_msg={}",
+                share_response.errno, share_response.errmsg, share_response.show_msg
             );
         }
 

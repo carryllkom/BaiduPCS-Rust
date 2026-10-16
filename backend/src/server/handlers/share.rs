@@ -274,14 +274,16 @@ pub async fn create_share(
                                             return Ok(Json(ApiResponse::success(result)));
                                         } else {
                                             error!(
-                                                "预热重试后仍失败: errno={}, errmsg={}",
-                                                retry_response.errno, retry_response.errmsg
+                                                "预热重试后仍失败: errno={}, errmsg={}, show_msg={}",
+                                                retry_response.errno,
+                                                retry_response.errmsg,
+                                                retry_response.show_msg
                                             );
                                             return Ok(Json(ApiResponse::error(
                                                 retry_response.errno,
                                                 format!(
                                                     "创建分享失败（已重试）: {}",
-                                                    retry_response.errmsg
+                                                    retry_response.error_reason()
                                                 ),
                                             )));
                                         }
@@ -306,12 +308,12 @@ pub async fn create_share(
                 }
 
                 error!(
-                    "创建分享失败: errno={}, errmsg={}",
-                    response.errno, response.errmsg
+                    "创建分享失败: errno={}, errmsg={}, show_msg={}",
+                    response.errno, response.errmsg, response.show_msg
                 );
                 Ok(Json(ApiResponse::error(
                     response.errno,
-                    format!("创建分享失败: {}", response.errmsg),
+                    format!("创建分享失败: {}", response.error_reason()),
                 )))
             }
         }
