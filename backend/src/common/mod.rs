@@ -2,6 +2,7 @@
 //!
 //! 提供跨模块使用的通用组件
 
+pub mod atomic_write;
 mod memory_monitor;
 pub mod path_utils;
 pub mod proxy;
@@ -12,6 +13,7 @@ pub mod retry;
 mod speed_anomaly_detector;
 mod thread_stagnation_detector;
 
+pub use atomic_write::{cleanup_stale_tmp_files, write_atomic, write_atomic_sync};
 pub use memory_monitor::{MemoryAnomaly, MemoryMonitor, MemoryMonitorConfig, MemorySample};
 pub use path_utils::generate_unique_path;
 pub use proxy::{ProxyConfig, ProxyType};
