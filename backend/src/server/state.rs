@@ -203,6 +203,10 @@ pub struct AppState {
 impl AppState {
     /// 创建新的应用状态
     pub async fn new() -> anyhow::Result<Self> {
+        // 清理上次写配置文件时被强杀残留的原子写临时文件；
+        // 必须在本进程写 config/ 下任何文件之前执行
+        crate::common::cleanup_stale_tmp_files(std::path::Path::new("config"));
+
         // 加载配置
         let config = AppConfig::load_or_default("config/app.toml").await;
 

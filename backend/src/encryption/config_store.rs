@@ -93,7 +93,8 @@ impl EncryptionConfigStore {
         let content = serde_json::to_string_pretty(config)
             .map_err(|e| anyhow!("序列化加密配置失败: {}", e))?;
 
-        std::fs::write(&self.config_path, content)
+        // 原子写入：主密钥文件一旦写坏，已加密的备份将无法解密
+        crate::common::write_atomic_sync(&self.config_path, content.as_bytes())
             .map_err(|e| anyhow!("写入加密配置失败: {}", e))?;
 
         tracing::info!("Saved encryption config to {:?}", self.config_path);

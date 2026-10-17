@@ -4722,7 +4722,7 @@ impl AutoBackupManager {
             std::fs::create_dir_all(parent)?;
         }
 
-        std::fs::write(&self.config_path, json)?;
+        crate::common::write_atomic(&self.config_path, json).await?;
         Ok(())
     }
 

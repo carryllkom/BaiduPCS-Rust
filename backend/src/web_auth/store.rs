@@ -91,7 +91,8 @@ impl AuthStore {
         let content = serde_json::to_string_pretty(&*credentials)
             .map_err(|e| WebAuthError::StorageError(format!("序列化凭证失败: {}", e)))?;
 
-        fs::write(&self.path, content)
+        // 原子写入：中途被打断也不会留下截断的凭证文件
+        crate::common::write_atomic(&self.path, content)
             .await
             .map_err(|e| WebAuthError::StorageError(format!("写入凭证文件失败: {}", e)))?;
 
