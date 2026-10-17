@@ -1634,7 +1634,7 @@ impl TransferManager {
                     let mut app_cfg = app_config.write().await;
                     app_cfg.transfer.recent_save_fs_id = Some(save_fs_id);
                     app_cfg.transfer.recent_save_path = Some(save_path.clone());
-                    if let Err(e) = app_cfg.save_to_file("config/app.toml").await {
+                    if let Err(e) = app_cfg.save_to_file(crate::config::APP_CONFIG_PATH).await {
                         warn!("保存转存配置失败: {}", e);
                     }
                 }

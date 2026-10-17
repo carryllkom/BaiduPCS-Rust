@@ -146,7 +146,7 @@ pub async fn update_multi_account_budget(
         let mut config = app_state.config.write().await;
         config.multi_account_budget = body.clone();
         config
-            .save_to_file("config/app.toml")
+            .save_to_file(crate::config::APP_CONFIG_PATH)
             .await
             .map_err(ApiError::Internal)?;
     }
@@ -202,7 +202,7 @@ pub async fn update_vip_recommended(
         let mut config = app_state.config.write().await;
         config.multi_account_vip_recommended = body.clone();
         config
-            .save_to_file("config/app.toml")
+            .save_to_file(crate::config::APP_CONFIG_PATH)
             .await
             .map_err(ApiError::Internal)?;
     }

@@ -924,11 +924,9 @@ pub async fn update_config(
 
     drop(credentials);
 
-    // 更新内存中的配置
-    state.update_config(config.clone()).await;
-
-    // 持久化配置到 app.toml
-    if let Err(e) = persist_web_auth_config(&config).await {
+    // 先落盘（同时同步到应用主配置），成功后再切换运行时认证状态：
+    // 落盘失败时运行时保持原样，避免「当前生效、重启后失效」
+    if let Err(e) = state.persist_and_apply_config(config.clone()).await {
         warn!("Failed to persist web auth config: {}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -946,48 +944,6 @@ pub async fn update_config(
     }
 
     (StatusCode::OK, Json(SuccessResponse::ok())).into_response()
-}
-
-/// 持久化 Web 认证配置到 app.toml
-async fn persist_web_auth_config(config: &crate::web_auth::WebAuthConfig) -> Result<(), String> {
-    use std::path::Path;
-    use tokio::fs;
-
-    let config_path = "config/app.toml";
-
-    // 读取现有配置
-    let content = fs::read_to_string(config_path)
-        .await
-        .map_err(|e| format!("读取配置文件失败: {}", e))?;
-
-    // 解析为 toml::Value 以便修改
-    let mut toml_value: toml::Value =
-        toml::from_str(&content).map_err(|e| format!("解析配置文件失败: {}", e))?;
-
-    // 更新 web_auth 部分
-    if let Some(table) = toml_value.as_table_mut() {
-        let web_auth_value = toml::Value::try_from(config)
-            .map_err(|e| format!("序列化 web_auth 配置失败: {}", e))?;
-        table.insert("web_auth".to_string(), web_auth_value);
-    }
-
-    // 写回文件
-    let new_content =
-        toml::to_string_pretty(&toml_value).map_err(|e| format!("序列化配置失败: {}", e))?;
-
-    // 确保目录存在
-    if let Some(parent) = Path::new(config_path).parent() {
-        fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("创建目录失败: {}", e))?;
-    }
-
-    fs::write(config_path, new_content)
-        .await
-        .map_err(|e| format!("写入配置文件失败: {}", e))?;
-
-    debug!("Web auth config persisted to {}", config_path);
-    Ok(())
 }
 
 // ============================================================================

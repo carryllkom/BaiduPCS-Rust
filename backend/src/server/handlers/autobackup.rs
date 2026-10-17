@@ -992,8 +992,9 @@ pub async fn update_trigger_config(
         }
     }
 
-    // 获取当前配置并更新
-    let mut config = app_state.config.read().await.clone();
+    // 获取当前配置并更新（持写锁直到回写内存，避免与其他保存交错丢更新）
+    let mut config_guard = app_state.config.write().await;
+    let mut config = config_guard.clone();
 
     // 更新上传触发配置
     if let Some(upload) = req.upload_trigger {
@@ -1041,12 +1042,13 @@ pub async fn update_trigger_config(
 
     // 保存到文件
     config
-        .save_to_file("config/app.toml")
+        .save_to_file(crate::config::APP_CONFIG_PATH)
         .await
         .map_err(|e| internal_error(&e.to_string()))?;
 
     // 更新内存中的配置
-    *app_state.config.write().await = config.clone();
+    *config_guard = config.clone();
+    drop(config_guard);
 
     // 通知自动备份管理器更新调度器配置
     if let Ok(manager) = get_manager(&app_state).await {

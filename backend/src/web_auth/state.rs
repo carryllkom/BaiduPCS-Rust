@@ -7,6 +7,7 @@
 //! - 速率限制器
 //! - 清理任务生命周期管理
 
+use crate::config::AppConfig;
 use crate::web_auth::rate_limiter::RateLimiter;
 use crate::web_auth::store::AuthStore;
 use crate::web_auth::token::TokenService;
@@ -29,6 +30,14 @@ pub struct WebAuthState {
     pub rate_limiter: Arc<RateLimiter>,
     /// 凭证存储
     pub auth_store: Arc<AuthStore>,
+    /// 应用主配置（与 AppState 共享同一份）
+    ///
+    /// 认证开关必须写进这份共享配置再落盘：若只写文件、不改它，之后任何一次
+    /// 保存主配置（转存成功、设置页保存等）都会把启动时的旧开关写回 app.toml，
+    /// 重启后认证被静默关闭（issue #177）。
+    app_config: Option<Arc<RwLock<AppConfig>>>,
+    /// 应用主配置文件路径
+    app_config_path: String,
 }
 
 impl WebAuthState {
@@ -51,7 +60,43 @@ impl WebAuthState {
             token_service: Arc::new(TokenService::new(jwt_secret)),
             rate_limiter: Arc::new(RateLimiter::new()),
             auth_store,
+            app_config: None,
+            app_config_path: String::new(),
         }
+    }
+
+    /// 关联应用主配置及其文件路径，认证开关的持久化依赖它
+    pub fn with_app_config(
+        mut self,
+        app_config: Arc<RwLock<AppConfig>>,
+        app_config_path: impl Into<String>,
+    ) -> Self {
+        self.app_config = Some(app_config);
+        self.app_config_path = app_config_path.into();
+        self
+    }
+
+    /// 持久化并应用认证配置：同步到应用主配置、写入 app.toml，再切换运行时状态
+    ///
+    /// 全程持有主配置写锁：与其他保存主配置的路径串行，不会被并发保存用旧值覆盖；
+    /// 并发的两次开关请求也不会出现「落盘的是 A、生效的是 B」。
+    /// 落盘失败时主配置与运行时状态都保持原样。
+    pub async fn persist_and_apply_config(&self, new_config: WebAuthConfig) -> Result<(), String> {
+        let app_config = self
+            .app_config
+            .as_ref()
+            .ok_or_else(|| "未关联应用配置，无法持久化认证设置".to_string())?;
+
+        let mut guard = app_config.write().await;
+        let mut next = guard.clone();
+        next.web_auth = new_config.clone();
+        next.write_to_file(&self.app_config_path)
+            .await
+            .map_err(|e| format!("{:#}", e))?;
+        *guard = next;
+
+        self.update_config(new_config).await;
+        Ok(())
     }
 
     /// 启动清理任务
@@ -167,6 +212,56 @@ mod tests {
             Some("test_secret".to_string()),
             auth_store,
         )
+    }
+
+    /// issue #177 回归：认证开关落盘后必须同步到共享的应用主配置，
+    /// 否则之后任何一次保存主配置都会把旧开关写回 app.toml
+    #[tokio::test]
+    async fn test_persist_config_syncs_shared_app_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.toml");
+        let path = path.to_str().unwrap().to_string();
+
+        let mut initial = AppConfig::default();
+        initial.download.download_dir = dir.path().to_path_buf();
+        let app_config = Arc::new(RwLock::new(initial));
+        let state = create_test_state().with_app_config(Arc::clone(&app_config), path.clone());
+
+        let enabled = WebAuthConfig {
+            enabled: true,
+            mode: AuthMode::PasswordTotp,
+        };
+        state.persist_and_apply_config(enabled).await.unwrap();
+
+        assert_eq!(state.get_auth_mode().await, AuthMode::PasswordTotp);
+        assert_eq!(
+            app_config.read().await.web_auth.mode,
+            AuthMode::PasswordTotp
+        );
+
+        // 模拟转存成功 / 设置页保存：用共享主配置整份重写 app.toml
+        let mut other = app_config.write().await;
+        other.transfer.recent_save_path = Some("/somewhere".to_string());
+        other.save_to_file(&path).await.unwrap();
+        drop(other);
+
+        let reloaded = AppConfig::load_from_file(&path).await.unwrap();
+        assert_eq!(reloaded.web_auth.mode, AuthMode::PasswordTotp);
+        assert!(reloaded.web_auth.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_persist_config_without_app_config_fails() {
+        let state = create_test_state();
+        assert!(state
+            .persist_and_apply_config(WebAuthConfig {
+                enabled: true,
+                mode: AuthMode::Password,
+            })
+            .await
+            .is_err());
+        // 落盘失败时运行时状态不变
+        assert_eq!(state.get_auth_mode().await, AuthMode::None);
     }
 
     #[tokio::test]
