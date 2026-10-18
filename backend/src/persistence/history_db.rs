@@ -16,6 +16,17 @@ use super::folder::FolderPersisted;
 use super::types::{TaskMetadata, TaskPersistenceStatus, TaskType};
 use crate::downloader::folder::FolderStatus;
 
+/// 文件夹下载里一个已成功完成的文件（来自子任务历史，见 `get_completed_files_by_group`）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedGroupFile {
+    /// 相对文件夹根目录的路径
+    pub relative_path: String,
+    /// 网盘侧文件身份；历史记录缺失或为 0 时为 `None`
+    pub fs_id: Option<u64>,
+    /// 文件大小（字节）
+    pub file_size: u64,
+}
+
 /// 历史数据库管理器
 pub struct HistoryDbManager {
     /// SQLite 连接
@@ -109,6 +120,11 @@ impl HistoryDbManager {
         )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_task_history_status ON task_history(status, completed_at)",
+            [],
+        )?;
+        // 文件夹恢复对账按 group_id 查已完成子任务（`get_completed_files_by_group`）
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_history_group ON task_history(group_id)",
             [],
         )?;
 
@@ -1091,37 +1107,45 @@ impl HistoryDbManager {
         Ok(deleted > 0)
     }
 
-    /// 🔥 按 group_id 查询已成功完成的子任务相对路径集合
+    /// 🔥 按 group_id 查询已成功完成的子任务（每个文件一条）
     ///
-    /// 用于文件夹下载恢复时对 `pending_files` 做对账：已完成的子任务在归档后会从活跃
-    /// 任务表移除，仅存在于本历史库；若不据此剔除，陈旧的 `pending_files` 快照会把这些
-    /// 文件重新排进任务队列并重复下载（issue #141）。
+    /// 用于文件夹下载恢复时对账：已完成的子任务在归档后会从活跃任务表移除，仅存在于
+    /// 本历史库。据此可以
+    /// - 剔除陈旧 `pending_files` 快照里已下完的文件，避免重复下载（issue #141）；
+    /// - 补回快照里漏记的完成数 —— 子任务归档在先、文件夹快照落盘在后，强杀落在两者
+    ///   之间时，快照里的 `completed_count` 会少记，文件夹永远凑不满 `total_files`。
     ///
-    /// 只返回 `relative_path` 非空的记录（单文件下载无此字段）。
-    pub fn get_completed_relative_paths_by_group(
-        &self,
-        group_id: &str,
-    ) -> Result<std::collections::HashSet<String>> {
+    /// 同一个文件可能被重复建过任务，这里按 `relative_path` 去重。只返回
+    /// `relative_path` 非空的记录（单文件下载无此字段）。
+    pub fn get_completed_files_by_group(&self, group_id: &str) -> Result<Vec<CompletedGroupFile>> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("获取数据库锁失败: {}", e))?;
 
         let mut stmt = conn.prepare(
-            "SELECT relative_path FROM task_history \
+            "SELECT relative_path, MAX(fs_id), MAX(file_size) FROM task_history \
              WHERE group_id = ?1 AND status = 'completed' \
-             AND relative_path IS NOT NULL AND relative_path != ''",
+             AND relative_path IS NOT NULL AND relative_path != '' \
+             GROUP BY relative_path",
         )?;
 
-        let rows = stmt.query_map(params![group_id], |row| row.get::<_, String>(0))?;
+        let rows = stmt.query_map(params![group_id], |row| {
+            Ok(CompletedGroupFile {
+                relative_path: row.get::<_, String>(0)?,
+                fs_id: row
+                    .get::<_, Option<i64>>(1)?
+                    .filter(|id| *id > 0)
+                    .map(|id| id as u64),
+                file_size: row.get::<_, Option<i64>>(2)?.unwrap_or(0).max(0) as u64,
+            })
+        })?;
 
-        let mut result = std::collections::HashSet::new();
+        let mut result = Vec::new();
         for row in rows {
             match row {
-                Ok(path) => {
-                    result.insert(path);
-                }
-                Err(e) => warn!("读取已完成子任务相对路径失败: {}", e),
+                Ok(file) => result.push(file),
+                Err(e) => warn!("读取已完成子任务记录失败: {}", e),
             }
         }
 
@@ -2096,6 +2120,65 @@ mod tests {
         assert_eq!(f.skipped_size, 3_307_595, "跳过字节数必须还原");
         assert_eq!(f.skipped_entries.len(), 2, "跳过明细必须还原");
         assert_eq!(f.skipped_entries[1].relative_path, "子目录/b.doc");
+    }
+
+    /// 文件夹对账用的已完成文件查询：按相对路径去重，只认本组、已完成的记录
+    #[test]
+    fn test_get_completed_files_by_group() {
+        let dir = TempDir::new().unwrap();
+        let db = HistoryDbManager::new(&dir.path().join("h.db")).unwrap();
+
+        let sub = |id: &str, group: &str, fs_id: u64, rel: &str, size: u64, ok: bool| {
+            let mut m = TaskMetadata::new_download(
+                id.into(),
+                fs_id,
+                format!("/r/{}", rel),
+                format!("/l/{}", rel).into(),
+                size,
+                size,
+                1,
+                None,
+                None,
+            );
+            m.set_group_info(Some(group.into()), Some("/r".into()), Some(rel.into()));
+            if ok {
+                m.mark_completed();
+            } else {
+                m.mark_failed();
+            }
+            m
+        };
+        for m in [
+            sub("t-1", "f-1", 11, "a.mp4", 100, true),
+            // 同一个文件被重复建过任务：只算一条
+            sub("t-2", "f-1", 11, "a.mp4", 100, true),
+            sub("t-3", "f-1", 22, "子目录/b.mp4", 200, true),
+            // 失败的不算
+            sub("t-4", "f-1", 33, "c.mp4", 300, false),
+            // 别的文件夹不算
+            sub("t-5", "f-2", 44, "d.mp4", 400, true),
+        ] {
+            db.add_task_to_history(&m).unwrap();
+        }
+
+        let mut files = db.get_completed_files_by_group("f-1").unwrap();
+        files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+        assert_eq!(
+            files,
+            vec![
+                CompletedGroupFile {
+                    relative_path: "a.mp4".into(),
+                    fs_id: Some(11),
+                    file_size: 100,
+                },
+                CompletedGroupFile {
+                    relative_path: "子目录/b.mp4".into(),
+                    fs_id: Some(22),
+                    file_size: 200,
+                },
+            ]
+        );
+        assert!(db.get_completed_files_by_group("none").unwrap().is_empty());
     }
 
     /// 菜单进度统计用的轻量查询：已完成、非备份，按类型区分，并标出是否属于文件夹

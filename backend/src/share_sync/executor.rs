@@ -38,7 +38,8 @@ use std::time::Duration;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-const TASK_WAIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// 等转存 / 下载完成时允许的最长无进展时间；重启续跑接管（manager）也用同一口径。
+pub(crate) const TASK_WAIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const TASK_OPERATION_MAX_ATTEMPTS: usize = 3;
 /// 二分递归深度上限（既用于失败后二分,也用于 Netdisk 主动预拆批）。
 const BISECT_MAX_DEPTH: u32 = 32;
