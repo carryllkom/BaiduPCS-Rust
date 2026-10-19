@@ -113,4 +113,7 @@ pub use migration::{
 };
 
 // 导出迁移前完整备份
-pub use backup::{create_pre_migration_backup, needs_pre_migration_backup, PreMigrationBackup};
+pub use backup::{
+    create_pre_migration_backup, ensure_backup_version_recorded, needs_pre_migration_backup,
+    PreMigrationBackup,
+};
