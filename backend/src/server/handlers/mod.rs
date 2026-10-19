@@ -34,7 +34,8 @@ pub use share::*;
 pub use share_sync::{
     create_subscription, delete_subscription, disable_subscription, enable_subscription, get_run,
     get_subscription, latest_snapshot, list_run_items, list_runs, list_subscriptions,
-    list_subtasks, preview_tree, resume_subscription, trigger_subscription, update_subscription,
+    list_subtasks, preview_cron, preview_tree, resume_subscription, trigger_subscription,
+    update_subscription,
 };
 pub use task_summary::get_tasks_summary;
 pub use transfer::*;
