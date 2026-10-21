@@ -63,6 +63,9 @@
                 <template v-if="s.exclude_patterns.length">
                   <span class="dot">·</span><span>排除 {{ s.exclude_patterns.length }} 条</span>
                 </template>
+                <template v-if="s.exclude_paths?.length">
+                  <span class="dot">·</span><span>排除目录 {{ s.exclude_paths.length }} 个</span>
+                </template>
                 <template v-if="s.delete_missing">
                   <span class="dot">·</span><span class="danger-text">删除缺失</span>
                 </template>
@@ -124,6 +127,21 @@
                   <span class="task-status-text">扫描分享目录中…</span>
                 </div>
                 <span class="scan-stat">{{ scanSummary(scanOf(s.id)!) }}</span>
+                <!-- 取消本次扫描：只停扫描，已开始的转存/下载不受影响 -->
+                <el-tooltip content="取消本次扫描" placement="top">
+                  <el-button
+                      class="scan-cancel-btn"
+                      size="small"
+                      text
+                      circle
+                      aria-label="取消本次扫描"
+                      :loading="cancellingId === s.id"
+                      :disabled="cancellingId === s.id"
+                      @click.stop="cancelScanNow(s)"
+                  >
+                    <el-icon><Close /></el-icon>
+                  </el-button>
+                </el-tooltip>
               </div>
               <div class="scan-body">
                 <!-- BFS 边扫边发现新子目录，待扫描数会涨；给百分比会让进度条倒退，
@@ -288,6 +306,19 @@
             </div>
             <span v-else>无</span>
           </el-descriptions-item>
+          <el-descriptions-item label="排除目录">
+            <div v-if="(selected.exclude_paths?.length ?? 0) > 0" class="path-tags">
+              <el-tag
+                  v-for="(p, i) in selected.exclude_paths"
+                  :key="`exp-${i}`"
+                  size="small"
+                  type="warning"
+              >
+                {{ p }}
+              </el-tag>
+            </div>
+            <span v-else>无</span>
+          </el-descriptions-item>
           <el-descriptions-item label="轮询">
             <span v-if="isPollEnabled(selected.poll_config)">
               {{ describeInterval(selected.poll_config) }}
@@ -305,6 +336,8 @@
     <!-- 创建/编辑对话框 -->
     <el-dialog
         v-model="dialogVisible"
+        class="subscription-dialog"
+        align-center
         title="编辑订阅"
         width="640px"
         @close="resetForm"
@@ -327,6 +360,7 @@
               :owner-logged-in="selectedOwnerLoggedIn"
               v-model:include-paths="form.include_paths"
               v-model:exclude-patterns="form.exclude_patterns"
+              v-model:exclude-paths="form.exclude_paths"
           />
         </el-form-item>
         <el-form-item label="冲突策略">
@@ -338,38 +372,49 @@
         </el-form-item>
         <el-form-item label="同步目标">
           <div class="sync-mode-editor">
-            <div class="sync-toggle-row">
-              <el-switch v-model="netdiskEnabled" />
-              <span class="sync-toggle-label">转存到网盘</span>
-            </div>
-            <div v-if="netdiskEnabled" class="mode-target-row">
-              <span class="mode-target-label">网盘目录</span>
-              <el-input
-                  v-model="netdiskRemotePath"
-                  placeholder="网盘路径，如 /我的资源/同步"
-                  style="flex: 1"
-              />
-            </div>
-
-            <div class="sync-toggle-row">
-              <el-switch v-model="localEnabled" />
-              <span class="sync-toggle-label">下载到本地</span>
-            </div>
-            <div v-if="localEnabled" class="mode-target-row">
-              <span class="mode-target-label">本地目录</span>
-              <span
-                  class="mode-target-value"
-                  :class="{ 'is-placeholder': !localTargetPath }"
-                  @click="openDirPicker()"
-              >
-                {{ localTargetPath || '点击选择本地目录' }}
-              </span>
-              <el-button :icon="FolderOpened" @click="openDirPicker()" style="margin-left: 4px">
-                选择
-              </el-button>
+            <div class="target-row">
+              <div class="target-switch">
+                <el-switch v-model="netdiskEnabled" aria-label="转存到网盘" />
+                <span class="target-label">转存到网盘</span>
+              </div>
+              <div class="target-path">
+                <el-input
+                    v-model="netdiskRemotePath"
+                    :disabled="!netdiskEnabled"
+                    aria-label="网盘目录"
+                    placeholder="网盘路径，如 /我的资源/同步"
+                />
+              </div>
             </div>
 
-            <div class="sync-mode-hint">{{ syncModeHint }}</div>
+            <div class="target-row">
+              <div class="target-switch">
+                <el-switch v-model="localEnabled" aria-label="下载到本地" />
+                <span class="target-label">下载到本地</span>
+              </div>
+              <div class="target-path">
+                <el-input
+                    v-model="localTargetPath"
+                    readonly
+                    clearable
+                    :disabled="!localEnabled"
+                    aria-label="本地目录"
+                    placeholder="点击「选择」指定本地目录"
+                    @clear="localTargetPath = ''"
+                >
+                  <template #append>
+                    <el-button
+                        :icon="FolderOpened"
+                        :disabled="!localEnabled"
+                        aria-label="选择本地目录"
+                        @click="openDirPicker()"
+                    >选择</el-button>
+                  </template>
+                </el-input>
+              </div>
+            </div>
+
+            <div v-if="syncModeHint" class="sync-mode-hint">{{ syncModeHint }}</div>
           </div>
         </el-form-item>
         <el-form-item label="轮询">
@@ -515,7 +560,7 @@ import { FilePickerModal } from '@/components/FilePicker'
 import { getConfig, updateRecentDirDebounced, setDefaultDownloadDir, type DownloadConfig } from '@/api/config'
 import {
   Plus, Edit, Delete, Refresh, RefreshRight, Link,
-  FolderOpened, VideoPause, VideoPlay, Loading, Clock, ArrowDown, ArrowRight,
+  FolderOpened, VideoPause, VideoPlay, Loading, Clock, ArrowDown, ArrowRight, Close,
 } from '@element-plus/icons-vue'
 import {
   type ShareSubscription,
@@ -530,7 +575,7 @@ import {
   type ShareSyncWsEvent,
   type ShareSyncSubtask,
   listSubscriptions, updateSubscription,
-  deleteSubscription, setSubscriptionEnabled, triggerSubscription, resumeSubscription, listRuns, getRun, listRunItems, listSubtasks,
+  deleteSubscription, setSubscriptionEnabled, triggerSubscription, resumeSubscription, cancelScan, listRuns, getRun, listRunItems, listSubtasks,
 } from '@/api/shareSync'
 import { getWebSocketClient, connectWebSocket, type ConnectionState } from '@/utils/websocket'
 import { createAdaptivePoller } from '@/utils/backendHealth'
@@ -663,6 +708,47 @@ function setScanProgress(id: string, st: Omit<ScanProgressState, 'received_at'> 
   scanProgress.value = next
 }
 
+/**
+ * 各订阅当前已知的最新一轮 run_id。按订阅清理状态前先比对 run 身份，
+ * 迟到的旧事件不得抹掉新一轮的扫描进度。
+ */
+const latestRunIds = ref<Map<string, string>>(new Map())
+
+function noteLatestRun(subId: string, runId?: string | null) {
+  if (!runId) return
+  const next = new Map(latestRunIds.value)
+  next.set(subId, runId)
+  latestRunIds.value = next
+}
+
+/**
+ * 该事件是否仍对应当前订阅的最新一轮；尚无记录（页面刚打开）时视为最新。
+ */
+function isLatestRun(subId: string, runId?: string | null): boolean {
+  const latest = latestRunIds.value.get(subId)
+  if (!latest) return true
+  if (runId && latest !== runId) return false
+  return true
+}
+
+/**
+ * 只在状态仍属于该轮时清理扫描进度，避免旧响应/旧事件抹掉新一轮的取消入口。
+ */
+function clearScanProgressForRun(subId: string, runId?: string | null): boolean {
+  if (!isLatestRun(subId, runId)) return false
+  setScanProgress(subId, null)
+  return true
+}
+
+/** 同上，并连同该订阅的进行中子任务一起清理。 */
+function clearRunStateForRun(subId: string, runId?: string | null): boolean {
+  if (!clearScanProgressForRun(subId, runId)) return false
+  const next = new Map(activeSubtasks.value)
+  next.delete(subId)
+  activeSubtasks.value = next
+  return true
+}
+
 // 后端每 ~500ms 推一帧；超过 20s 没有新帧，说明 run 早已结束或断连，
 // 而结束事件没送达（WS 掉线等）。留着会让卡片永远转圈，比没有进度更误导。
 const SCAN_STALE_MS = 20_000
@@ -764,6 +850,8 @@ const detailDialogVisible = ref(false)
 const saving = ref(false)
 const triggeringId = ref<string | null>(null)
 const resumingId = ref<string | null>(null)
+// 正在取消扫描的订阅：用于禁用重复点击
+const cancellingId = ref<string | null>(null)
 const formRef = ref()
 const scheduledTime = ref<string>('03:00')
 
@@ -801,6 +889,20 @@ function findLocalTarget(): LocalTarget | undefined {
   return form.value.targets.find((t): t is LocalTarget => t.kind === 'local')
 }
 
+// 关闭的开关只在表单里移除目标，但路径等草稿留在本次对话框会话里，
+// 重新打开时原样恢复（不写回订阅、不跨订阅/新建泄漏）。
+const netdiskDraft = ref<NetdiskTarget>({ kind: 'netdisk', remote_path: '/', save_fs_id: 0, conflict_strategy: null })
+const localDraft = ref<LocalTarget>({ kind: 'local', local_path: '', conflict_strategy: null, mode: 'share_direct' })
+
+function seedTargetDrafts(targets: SyncTarget[]) {
+  const nd = targets.find((t): t is NetdiskTarget => t.kind === 'netdisk')
+  const lo = targets.find((t): t is LocalTarget => t.kind === 'local')
+  netdiskDraft.value = nd
+      ? { ...nd }
+      : { kind: 'netdisk', remote_path: '/', save_fs_id: 0, conflict_strategy: null }
+  localDraft.value = lo ? { ...lo } : { kind: 'local', local_path: '', conflict_strategy: null, mode: 'share_direct' }
+}
+
 // 按开关重建目标列表，尽量保留已填的网盘/本地路径，避免误清空
 function rebuildTargets(netdisk: boolean, local: boolean) {
   if (!netdisk && !local) {
@@ -809,18 +911,15 @@ function rebuildTargets(netdisk: boolean, local: boolean) {
   }
   const nd = findNetdiskTarget()
   const lo = findLocalTarget()
-  const remotePath = nd?.remote_path ?? '/'
-  const saveFsId = nd?.save_fs_id ?? 0
-  const localPath = lo?.local_path ?? ''
-  const ndStrategy = nd?.conflict_strategy ?? null
-  const loStrategy = lo?.conflict_strategy ?? null
+  if (nd) netdiskDraft.value = { ...nd }
+  if (lo) localDraft.value = { ...lo }
   const next: SyncTarget[] = []
   if (netdisk) {
-    next.push({ kind: 'netdisk', remote_path: remotePath, save_fs_id: saveFsId, conflict_strategy: ndStrategy })
+    next.push({ ...netdiskDraft.value })
   }
   if (local) {
     // 有网盘目标=转存并下载（复用网盘副本）；无=分享直下。后端最终按目标存在性推导，这里保持一致。
-    next.push({ kind: 'local', local_path: localPath, conflict_strategy: loStrategy, mode: netdisk ? 'transfer_and_download' : 'share_direct' })
+    next.push({ ...localDraft.value, mode: netdisk ? 'transfer_and_download' : 'share_direct' })
   }
   form.value.targets = next
 }
@@ -837,23 +936,25 @@ const localEnabled = computed<boolean>({
 const syncModeHint = computed(() => {
   const nd = netdiskEnabled.value
   const lo = localEnabled.value
-  if (nd && lo) return '转存到网盘目录并保留，再从这份网盘副本下载到本地（只转存一次，不会重复转存）。'
-  if (nd) return '只把分享内容转存到指定网盘目录并保留，不下载到本地。'
-  return '分享直下：转存到临时目录后下载到本地，下载完成即清理，网盘不留存。'
+  if (nd && lo) return '从网盘副本下载到本地，网盘保留。'
+  if (nd) return ''
+  return '下载后清理网盘临时文件。'
 })
 
 const netdiskRemotePath = computed<string>({
-  get() { return findNetdiskTarget()?.remote_path ?? '' },
+  get() { return findNetdiskTarget()?.remote_path ?? netdiskDraft.value.remote_path },
   set(v: string) {
     const nd = findNetdiskTarget()
     if (nd) nd.remote_path = v
+    netdiskDraft.value.remote_path = v
   },
 })
 const localTargetPath = computed<string>({
-  get() { return findLocalTarget()?.local_path ?? '' },
+  get() { return findLocalTarget()?.local_path ?? localDraft.value.local_path },
   set(v: string) {
     const lo = findLocalTarget()
     if (lo) lo.local_path = v
+    localDraft.value.local_path = v
   },
 })
 
@@ -863,6 +964,7 @@ const defaultForm = (): {
   password: string
   include_paths: string[]
   exclude_patterns: string[]
+  exclude_paths: string[]
   targets: SyncTarget[]
   conflict_strategy: ConflictStrategy
   delete_missing: boolean
@@ -873,6 +975,7 @@ const defaultForm = (): {
   password: '',
   include_paths: [],
   exclude_patterns: [],
+  exclude_paths: [],
   targets: [createDefaultTarget()],
   conflict_strategy: 'overwrite',
   delete_missing: false,
@@ -887,6 +990,7 @@ const defaultForm = (): {
 })
 
 const form = ref(defaultForm())
+seedTargetDrafts(form.value.targets)
 
 function normalizePollConfigForUi(p?: PollConfig | null): PollConfig {
   const rawMode = p?.mode || 'interval'
@@ -1030,6 +1134,7 @@ function openEdit(s?: ShareSubscription) {
     password: selected.value.password || '',
     include_paths: [...selected.value.include_paths],
     exclude_patterns: [...selected.value.exclude_patterns],
+    exclude_paths: [...(selected.value.exclude_paths ?? [])],
     targets: selected.value.targets.map(t => ({ ...t })) as SyncTarget[],
     conflict_strategy: selected.value.conflict_strategy,
     delete_missing: selected.value.delete_missing,
@@ -1044,6 +1149,7 @@ function openEdit(s?: ShareSubscription) {
     form.value.poll_config.schedule_hour = null
     form.value.poll_config.schedule_minute = null
   }
+  seedTargetDrafts(form.value.targets)
   dialogVisible.value = true
 }
 
@@ -1059,6 +1165,7 @@ function getApiErrorMessage(e: unknown): string {
 
 function resetForm() {
   formRef.value?.resetFields?.()
+  seedTargetDrafts(defaultForm().targets)
 }
 
 async function saveForm() {
@@ -1081,6 +1188,7 @@ async function saveForm() {
         password: form.value.password || null,
         include_paths: form.value.include_paths,
         exclude_patterns: form.value.exclude_patterns,
+        exclude_paths: form.value.exclude_paths,
         targets: form.value.targets,
         conflict_strategy: form.value.conflict_strategy,
         delete_missing: form.value.delete_missing,
@@ -1207,8 +1315,16 @@ function buildSanitizedPayload() {
       excludeSet.add(n)
     }
   }
+  const excludePathSet = new Set<string>()
+  for (const p of form.value.exclude_paths) {
+    const n = normalizePath(p)
+    if (n) {
+      excludePathSet.add(n)
+    }
+  }
   form.value.include_paths = Array.from(includeSet)
   form.value.exclude_patterns = Array.from(excludeSet)
+  form.value.exclude_paths = Array.from(excludePathSet)
 
   const nextTargets: SyncTarget[] = []
   for (const raw of form.value.targets) {
@@ -1319,6 +1435,33 @@ async function triggerNow(s?: ShareSubscription) {
   }
 }
 
+/**
+ * 取消当前扫描：只停扫描，订阅保持启用，已开始的转存/下载不受影响，
+ * 已进入执行阶段时后端返回 409 并如实提示。
+ *
+ * 请求带上观察到的那一轮 run_id：迟到请求不会执行，迟到的旧响应也不会
+ * 抹掉新一轮的扫描进度。
+ */
+async function cancelScanNow(s?: ShareSubscription) {
+  const target = s ?? selected.value
+  if (!target) return
+  const scan = scanOf(target.id)
+  if (!scan) return
+  if (cancellingId.value) return
+  cancellingId.value = target.id
+  try {
+    await cancelScan(target.id, scan.run_id)
+    // WS 事件到达时还会再清一次（幂等）
+    clearRunStateForRun(target.id, scan.run_id)
+    ElMessage.success('已取消本次扫描')
+    if (selected.value?.id === target.id) loadRuns(target.id)
+  } catch (e) {
+    ElMessage.error(`取消扫描失败: ${getApiErrorMessage(e)}`)
+  } finally {
+    cancellingId.value = null
+  }
+}
+
 async function openRun(runId: string) {
   try {
     currentRunId.value = runId
@@ -1356,6 +1499,7 @@ const dirPickerDefaultDir = computed(
 )
 
 function openDirPicker() {
+  if (!findLocalTarget()) return
   dirPickerVisible.value = true
 }
 
@@ -1454,7 +1598,8 @@ function describeRunStatus(s: string, phase?: string | null): string {
       s === 'completed' ? '已完成' :
           s === 'completed_with_errors' ? '完成（部分失败）' :
               s === 'failed' ? '失败' :
-                  s === 'interrupted' ? '已中断（自动重跑）' : s
+                  s === 'cancelled' ? '已取消' :
+                      s === 'interrupted' ? '已中断（自动重跑）' : s
 }
 
 function runStatusType(s: string): 'success' | 'warning' | 'danger' | 'info' {
@@ -1785,6 +1930,7 @@ onMounted(async () => {
       return
     }
     if (evt.type === 'scan_progress') {
+      noteLatestRun(sid, evt.run_id)
       setScanProgress(sid, {
         run_id: evt.run_id,
         dirs_done: evt.dirs_done,
@@ -1802,22 +1948,24 @@ onMounted(async () => {
     }
     if (evt.type === 'run_started') {
       // 新一轮开始：清掉旧的进度残留，随后由 item_progress / 轮询补齐
+      noteLatestRun(sid, evt.run_id)
       loadSubtasksFor(sid)
       setScanProgress(sid, null)
     }
     if (evt.type === 'diff_detected') {
-      // 抓取阶段结束，进入执行段：撤掉扫描卡片，让位给子任务进度
-      setScanProgress(sid, null)
+      // 进入执行段，撤掉扫描卡片；旧轮的 diff 事件不得撤掉新一轮的卡片。
+      clearScanProgressForRun(sid, evt.run_id)
     }
-    if (['run_completed', 'run_failed'].includes(evt.type)) {
-      // 一轮结束：清空该订阅的进行中子任务与扫描进度
-      const next = new Map(activeSubtasks.value)
-      next.delete(sid)
-      activeSubtasks.value = next
-      setScanProgress(sid, null)
+    if (evt.type === 'run_completed' || evt.type === 'run_failed') {
+      // 只清理仍属于这一轮的状态：迟到的旧完成事件不得抹掉新一轮的进度。
+      clearRunStateForRun(sid, evt.run_id)
+    }
+    if (evt.type === 'run_cancelled') {
+      // 取消只停扫描，不影响订阅；旧轮的取消事件不得抹掉新一轮的进度。
+      clearRunStateForRun(sid, evt.run_id)
     }
     if (sid === selected.value?.id) {
-      if (['run_started', 'run_completed', 'run_failed', 'diff_detected'].includes(evt.type)) {
+      if (['run_started', 'run_completed', 'run_failed', 'run_cancelled', 'diff_detected'].includes(evt.type)) {
         loadRuns(sid)
       }
       // run_completed 不再弹提示（结果可在运行历史里看）；仅失败时提醒。
@@ -2074,6 +2222,15 @@ onUnmounted(() => {
   font-size: 12px;
   color: #e6a23c;
 }
+// 取消扫描按钮：贴在扫描统计右侧，弱化但可点
+.scan-cancel-btn {
+  margin-left: 4px;
+  flex-shrink: 0;
+  color: #909399;
+}
+.scan-cancel-btn:hover {
+  color: var(--el-color-danger);
+}
 
 .no-active-task {
   margin-top: 12px;
@@ -2101,36 +2258,55 @@ onUnmounted(() => {
 .target-form-row { display: flex; align-items: center; margin-bottom: 8px; }
 .target-tip { margin-left: 8px; font-size: 12px; color: #909399; }
 
+// 订阅编辑弹窗：头部与底部固定，只有表单主体滚动；四周至少保留 16px 视口边距。
+:deep(.subscription-dialog) {
+  display: flex;
+  flex-direction: column;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+
+  .el-dialog__header,
+  .el-dialog__footer {
+    flex: 0 0 auto;
+  }
+
+  .el-dialog__body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+  }
+}
+
 .sync-mode-editor {
   width: 100%;
+
   .sync-mode-hint { margin: 8px 0 4px; font-size: 12px; color: #909399; }
-  .mode-target-row {
+
+  .target-row {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 8px;
     margin-top: 8px;
-    .mode-target-label {
-      width: 64px;
-      flex-shrink: 0;
-      font-size: 13px;
-      color: #606266;
-    }
-    .mode-target-value {
-      flex: 1;
-      min-width: 0;
-      padding: 0 11px;
-      height: 32px;
-      line-height: 32px;
-      border: 1px solid var(--el-border-color);
-      border-radius: 4px;
-      font-size: 14px;
-      color: #303133;
-      cursor: pointer;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      &:hover { border-color: var(--el-color-primary); }
-      &.is-placeholder { color: #a8abb2; }
-    }
+  }
+
+  .target-switch {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    gap: 6px;
+  }
+
+  .target-label {
+    font-size: 13px;
+    color: #606266;
+    white-space: nowrap;
+  }
+
+  .target-path {
+    flex: 1 1 240px;
+    min-width: 0;
   }
 }
 

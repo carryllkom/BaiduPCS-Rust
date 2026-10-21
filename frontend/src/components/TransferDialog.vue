@@ -120,6 +120,7 @@
                 :owner-logged-in="true"
                 v-model:include-paths="form.includePaths"
                 v-model:exclude-patterns="form.excludePatterns"
+                v-model:exclude-paths="form.excludePaths"
             />
           </el-form-item>
           <el-form-item label="转存到网盘">
@@ -329,6 +330,7 @@ const form = reactive({
   syncCronExpr: '',
   includePaths: [] as string[],
   excludePatterns: [] as string[],
+  excludePaths: [] as string[],
   // 订阅目标开关（至少开一个）：转存到网盘 / 同步到本地
   syncToNetdisk: true,
   syncToLocal: false,
@@ -431,6 +433,7 @@ async function handleOpen() {
   form.syncCronExpr = ''
   form.includePaths = []
   form.excludePatterns = []
+  form.excludePaths = []
 
   try {
     const [transferCfg, appConfig] = await Promise.all([
@@ -484,6 +487,7 @@ function handleClose() {
   form.syncCronExpr = ''
   form.includePaths = []
   form.excludePatterns = []
+  form.excludePaths = []
   form.syncToNetdisk = true
   form.syncToLocal = false
   form.syncLocalPath = ''
@@ -663,6 +667,7 @@ async function createSyncSubscription() {
       password: form.password || null,
       include_paths: form.includePaths,
       exclude_patterns: form.excludePatterns,
+      exclude_paths: form.excludePaths,
       targets: buildSyncTargets(),
       poll_config: pollConfig,
       // 显式归属当前活跃账号（缺省由后端回退）

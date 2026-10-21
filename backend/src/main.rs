@@ -662,6 +662,10 @@ async fn main() -> anyhow::Result<()> {
             post(handlers::resume_subscription),
         )
         .route(
+            "/share-sync/subscriptions/:id/cancel-scan",
+            post(handlers::share_sync::cancel_scan),
+        )
+        .route(
             "/share-sync/subscriptions/:id/runs",
             get(handlers::list_runs),
         )

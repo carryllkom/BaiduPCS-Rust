@@ -1,136 +1,196 @@
 <template>
   <div class="share-include-exclude-editor">
-    <!-- 同步路径（include_paths） -->
+    <!-- 同步内容（include_paths） -->
     <div class="field-block">
-      <div class="field-label">同步路径</div>
-      <div class="path-editor">
-        <div v-if="includePaths.length === 0" class="path-empty">
-          不选则同步整个分享；点「从分享浏览」可一次勾选多个文件/文件夹——勾选文件夹＝同步其中全部内容，勾选文件＝只同步该文件。
+      <div class="field-header">
+        <span class="field-label">同步内容</span>
+        <span v-if="includePaths.length === 0" class="field-state">整个分享</span>
+        <div class="path-actions">
+          <el-tooltip
+              :disabled="ownerLoggedIn !== false"
+              content="订阅所属账号未登录，请先登录该账号再预览目录树"
+              placement="top"
+          >
+            <span>
+              <el-button
+                  size="small"
+                  :icon="FolderOpened"
+                  :loading="previewing"
+                  :disabled="!shareUrl || ownerLoggedIn === false"
+                  @click="openPicker"
+              >从分享浏览</el-button>
+            </span>
+          </el-tooltip>
+          <el-button
+              size="small"
+              text
+              type="primary"
+              :aria-expanded="showIncludeHelp"
+              aria-label="同步内容使用说明"
+              @click="showIncludeHelp = !showIncludeHelp"
+          >
+            使用说明
+            <el-icon class="help-caret" aria-hidden="true">
+              <ArrowUp v-if="showIncludeHelp" />
+              <ArrowDown v-else />
+            </el-icon>
+          </el-button>
         </div>
-        <div v-else class="path-tags">
-          <el-tag
+      </div>
+      <div v-if="includePaths.length > 0" class="path-tags">
+        <el-tag
             v-for="(p, i) in includePaths"
             :key="p + i"
             closable
             @close="removeInclude(i)"
-            style="margin: 2px 4px 2px 0"
-          >{{ p }}</el-tag>
-        </div>
+        >{{ p }}</el-tag>
+      </div>
+      <p v-if="showIncludeHelp" class="field-help">
+        不选则同步整个分享。选择文件夹会包含其全部内容及后续新增内容；选择文件则只同步该文件。
+      </p>
+      <div v-if="ownerLoggedIn === false" class="owner-offline-hint">
+        订阅所属账号未登录，目录树预览不可用，请先登录该账号
+      </div>
+    </div>
+
+    <!-- 排除目录（exclude_paths）：精确目录排除 -->
+    <div class="field-block">
+      <div class="field-header">
+        <span class="field-label">排除目录</span>
         <div class="path-actions">
           <el-tooltip
-            :disabled="ownerLoggedIn !== false"
-            content="订阅所属账号未登录，请先登录该账号再预览目录树"
-            placement="top"
+              :disabled="ownerLoggedIn !== false"
+              content="订阅所属账号未登录，请先登录该账号再预览目录树"
+              placement="top"
           >
             <span>
               <el-button
-                size="small"
-                :icon="FolderOpened"
-                :loading="previewing"
-                :disabled="!shareUrl || ownerLoggedIn === false"
-                @click="openPicker"
+                  size="small"
+                  :icon="FolderOpened"
+                  :loading="previewing"
+                  :disabled="!shareUrl || ownerLoggedIn === false"
+                  @click="openExcludePicker"
               >从分享浏览</el-button>
             </span>
           </el-tooltip>
-        </div>
-        <div v-if="ownerLoggedIn === false" class="owner-offline-hint">
-          订阅所属账号未登录，目录树预览不可用，请先登录该账号
+          <el-button
+              size="small"
+              text
+              type="primary"
+              :aria-expanded="showExcludeFolderHelp"
+              aria-label="排除目录使用说明"
+              @click="showExcludeFolderHelp = !showExcludeFolderHelp"
+          >
+            使用说明
+            <el-icon class="help-caret" aria-hidden="true">
+              <ArrowUp v-if="showExcludeFolderHelp" />
+              <ArrowDown v-else />
+            </el-icon>
+          </el-button>
         </div>
       </div>
+      <div v-if="excludePaths.length > 0" class="path-tags">
+        <el-tag
+            v-for="(p, i) in excludePaths"
+            :key="p + i"
+            closable
+            type="warning"
+            @close="removeExcludePath(i)"
+        >{{ p }}</el-tag>
+      </div>
+      <p v-if="showExcludeFolderHelp" class="field-help">
+        所选目录及其全部内容均不扫描、不参与同步。
+      </p>
     </div>
 
     <!-- 排除规则（exclude_patterns） -->
     <div class="field-block">
-      <div class="field-label">排除规则</div>
-      <div class="path-editor">
-        <div class="path-tags">
-          <el-tag
+      <div class="field-header">
+        <span class="field-label">排除规则</span>
+        <div class="path-actions">
+          <el-button
+              size="small"
+              text
+              type="primary"
+              :aria-expanded="showExcludeHelp"
+              aria-label="排除规则使用说明"
+              @click="showExcludeHelp = !showExcludeHelp"
+          >
+            使用说明
+            <el-icon class="help-caret" aria-hidden="true">
+              <ArrowUp v-if="showExcludeHelp" />
+              <ArrowDown v-else />
+            </el-icon>
+          </el-button>
+        </div>
+      </div>
+      <div v-if="excludePatterns.length > 0" class="path-tags">
+        <el-tag
             v-for="(p, i) in excludePatterns"
             :key="p + i"
             closable
             type="info"
             @close="removeExclude(i)"
-            style="margin: 2px 4px 2px 0"
-          >{{ p }}</el-tag>
-          <span v-if="excludePatterns.length === 0" class="path-empty-inline">
-            支持 glob：*.tmp、sample.*、*广告* 等
-          </span>
-        </div>
-        <div class="exclude-input-row">
-          <!-- textarea：回车提交当前内容；粘贴多行文本原生保留换行 → 每行一条。
-               不用逗号等标点当分隔符 —— 它们是合法文件名字符，会切坏真实规则。 -->
-          <el-input
+        >{{ p }}</el-tag>
+      </div>
+      <div class="exclude-input-row">
+        <!-- textarea：回车提交当前内容；粘贴多行文本原生保留换行 → 每行一条。
+             不用逗号等标点当分隔符 —— 它们是合法文件名字符，会切坏真实规则。 -->
+        <el-input
             v-model="excludeInput"
+            class="exclude-input"
             type="textarea"
             :autosize="{ minRows: 1, maxRows: 4 }"
             resize="none"
             size="small"
-            placeholder="输入规则后回车添加；可粘贴多行一次添加（每行一条）"
-            style="width: 280px"
+            placeholder="输入规则，每行一条"
             @keydown.enter="onExcludeEnter"
-          />
-          <el-button size="small" plain type="primary" @click="addExclude">添加</el-button>
-          <el-button size="small" text type="primary" @click="showExcludeHelp = !showExcludeHelp">
-            <el-icon style="margin-right: 2px"><QuestionFilled /></el-icon>使用说明
-          </el-button>
-        </div>
-        <!-- 常用规则词表：来自系统设置（后端配置），点击即添加到当前规则。
-             词表的增删在 系统设置 → 分享同步 中维护。 -->
-        <div v-if="excludePresets.length > 0" class="preset-row">
+        />
+        <el-button size="small" plain type="primary" @click="addExclude">添加</el-button>
+      </div>
+      <ExcludeRuleHelp v-if="showExcludeHelp" />
+      <!-- 常用规则词表：来自系统设置（后端配置），点击即添加到当前规则。 -->
+      <div class="preset-row">
+        <template v-if="excludePresets.length > 0">
           <span class="preset-label">常用：</span>
           <el-tag
-            v-for="p in excludePresets"
-            :key="p"
-            size="small"
-            effect="plain"
-            class="preset-tag"
-            :type="excludePatterns.includes(p) ? 'success' : 'info'"
-            @click="applyPreset(p)"
+              v-for="p in excludePresets"
+              :key="p"
+              size="small"
+              effect="plain"
+              class="preset-tag"
+              :type="excludePatterns.includes(p) ? 'success' : 'info'"
+              @click="applyPreset(p)"
           >{{ p }}</el-tag>
-          <el-button
+        </template>
+        <el-button
             size="small"
-            plain
+            text
             :icon="Star"
             :disabled="excludePatterns.length === 0 || savingPresets"
             :loading="savingPresets"
             @click="saveCurrentAsPresets"
-          >存为常用</el-button>
-          <el-button size="small" plain :icon="Setting" @click="goManagePresets">管理</el-button>
-        </div>
-        <div v-else class="preset-row">
-          <span class="preset-label">
-            常用规则词表为空，可在
-            <el-link type="primary" :underline="false" style="font-size: 12px; vertical-align: baseline" @click="goManagePresets">系统设置 → 分享同步</el-link>
-            中配置
-          </span>
-          <el-button
-            size="small"
-            plain
-            :icon="Star"
-            :disabled="excludePatterns.length === 0 || savingPresets"
-            :loading="savingPresets"
-            @click="saveCurrentAsPresets"
-          >存为常用</el-button>
-        </div>
-        <ExcludeRuleHelp v-if="showExcludeHelp" />
+        >存为常用</el-button>
+        <el-button size="small" text :icon="Setting" @click="goManagePresets">管理常用规则</el-button>
       </div>
     </div>
 
     <!-- 从分享选择子路径：复用转存同款 ShareFileSelector -->
     <el-dialog
-      v-model="pickerVisible"
-      title="从分享中选择要同步的子路径"
-      width="680px"
-      :close-on-click-modal="false"
-      append-to-body
+        v-model="pickerVisible"
+        :title="pickerMode === 'exclude' ? '从分享中选择要排除的目录' : '从分享中选择要同步的子路径'"
+        width="680px"
+        :close-on-click-modal="false"
+        append-to-body
     >
       <ShareFileSelector
-        :files="previewFiles"
-        :loading="previewing"
-        :share-info="previewShareInfo"
-        :share-url="shareUrl"
-        :share-password="password || undefined"
-        @update:selected-files="onSelectedFiles"
+          :files="previewFiles"
+          :loading="previewing"
+          :share-info="previewShareInfo"
+          :share-url="shareUrl"
+          :share-password="password || undefined"
+          :folder-only="pickerMode === 'exclude'"
+          @update:selected-files="onSelectedFiles"
       />
       <template #footer>
         <span class="picker-hint">已选 {{ pendingSelected.length }} 项</span>
@@ -146,7 +206,7 @@ import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { AxiosError } from 'axios'
-import { FolderOpened, QuestionFilled, Setting, Star } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowUp, FolderOpened, Setting, Star } from '@element-plus/icons-vue'
 import ShareFileSelector from './ShareFileSelector.vue'
 import ExcludeRuleHelp from './ExcludeRuleHelp.vue'
 import { getConfig, updateConfig } from '@/api/config'
@@ -162,6 +222,8 @@ const props = defineProps<{
   password?: string | null
   includePaths: string[]
   excludePatterns: string[]
+  /** 精确排除的目录路径（相对分享根） */
+  excludePaths: string[]
   // 订阅所属账号：编辑订阅时传订阅自己的 owner_uid，预览目录树按该账号路由 client
   // （不传则后端回退当前 active 账号——转存对话框创建场景 owner=active）
   ownerUid?: number | null
@@ -173,6 +235,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:includePaths': [value: string[]]
   'update:excludePatterns': [value: string[]]
+  'update:excludePaths': [value: string[]]
 }>()
 
 const router = useRouter()
@@ -180,6 +243,8 @@ const excludeInput = ref('')
 
 // 分享文件选择器（与转存对话框同款体验）
 const pickerVisible = ref(false)
+// 选择器用途：同步子路径 / 排除目录（后者只允许选文件夹）
+const pickerMode = ref<'include' | 'exclude'>('include')
 const previewing = ref(false)
 const previewFiles = ref<SharedFileInfo[]>([])
 const previewShareInfo = ref<PreviewShareInfo | null>(null)
@@ -199,7 +264,15 @@ function removeInclude(i: number) {
   emit('update:includePaths', next)
 }
 
-// 排除规则使用说明的展开态
+function removeExcludePath(i: number) {
+  const next = [...props.excludePaths]
+  next.splice(i, 1)
+  emit('update:excludePaths', next)
+}
+
+// 各字段的使用说明展开态（彼此独立，默认全部折叠）
+const showIncludeHelp = ref(false)
+const showExcludeFolderHelp = ref(false)
 const showExcludeHelp = ref(false)
 
 /** 合并规则进当前列表并 emit（无变化不 emit） */
@@ -284,15 +357,7 @@ function removeExclude(i: number) {
   emit('update:excludePatterns', next)
 }
 
-async function openPicker() {
-  if (!props.shareUrl || !props.shareUrl.trim()) {
-    ElMessage.warning('请先填写分享链接')
-    return
-  }
-  if (props.ownerLoggedIn === false) {
-    ElMessage.warning('订阅所属账号未登录，请先登录该账号再预览目录树')
-    return
-  }
+async function loadPickerFiles() {
   previewing.value = true
   try {
     const resp = await previewShareFiles({
@@ -306,7 +371,7 @@ async function openPicker() {
   } catch (e) {
     const ax = e as AxiosError<{ message?: string; error?: string }>
     ElMessage.error(
-      ax?.response?.data?.message ||
+        ax?.response?.data?.message ||
         ax?.response?.data?.error ||
         (e as Error)?.message ||
         '加载分享文件失败',
@@ -316,14 +381,56 @@ async function openPicker() {
   }
 }
 
+async function openPicker() {
+  if (!props.shareUrl || !props.shareUrl.trim()) {
+    ElMessage.warning('请先填写分享链接')
+    return
+  }
+  if (props.ownerLoggedIn === false) {
+    ElMessage.warning('订阅所属账号未登录，请先登录该账号再预览目录树')
+    return
+  }
+  pickerMode.value = 'include'
+  await loadPickerFiles()
+}
+
+async function openExcludePicker() {
+  if (!props.shareUrl || !props.shareUrl.trim()) {
+    ElMessage.warning('请先填写分享链接')
+    return
+  }
+  if (props.ownerLoggedIn === false) {
+    ElMessage.warning('订阅所属账号未登录，请先登录该账号再预览目录树')
+    return
+  }
+  pickerMode.value = 'exclude'
+  await loadPickerFiles()
+}
+
 function onSelectedFiles(files: SharedFileInfo[]) {
   pendingSelected.value = files
 }
 
 function confirmPicker() {
   const selectedPaths = pendingSelected.value
-    .map((f) => normalizePath(f.path))
-    .filter((p) => p.length > 0)
+      .map((f) => normalizePath(f.path))
+      .filter((p) => p.length > 0)
+  if (pickerMode.value === 'exclude') {
+    // 精确排除：合并去重；祖先目录已覆盖的后代不必单独保留
+    const merged: string[] = []
+    const seen = new Set<string>()
+    for (const p of [...props.excludePaths, ...selectedPaths]) {
+      if (seen.has(p)) continue
+      seen.add(p)
+      merged.push(p)
+    }
+    const trimmed = merged.filter(
+        (p) => !merged.some((a) => a !== p && p.startsWith(`${a}/`)),
+    )
+    emit('update:excludePaths', trimmed)
+    pickerVisible.value = false
+    return
+  }
   // 与已有路径合并去重；勾选目录即代表整棵子树，裁剪掉被祖先覆盖的冗余后代
   const merged: string[] = []
   const seen = new Set<string>()
@@ -333,7 +440,7 @@ function confirmPicker() {
     merged.push(p)
   }
   const trimmed = merged.filter(
-    (p) => !merged.some((a) => a !== p && p.startsWith(`${a}/`)),
+      (p) => !merged.some((a) => a !== p && p.startsWith(`${a}/`)),
   )
   emit('update:includePaths', trimmed)
   pickerVisible.value = false
@@ -341,24 +448,40 @@ function confirmPicker() {
 </script>
 
 <style scoped lang="scss">
+// 占满父级内容宽度并允许收缩。width:100% 固定宽度基准 —— 否则展开说明会改变
+// 固有宽度，右对齐的操作区随之横移；min-width:0 解除 flex 子项的固有宽度下限。
+.share-include-exclude-editor {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
 .field-block {
   margin-bottom: 12px;
+}
+
+// 最后一个字段块不再叠加底部外边距，避免与父级表单间距重复。
+.field-block:last-of-type {
+  margin-bottom: 0;
+}
+
+// 头部一行：标题 + 状态 + 操作。窄屏允许换行，不强制单行不断。
+.field-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
 }
 
 .field-label {
   font-size: 13px;
   color: var(--el-text-color-regular);
-  margin-bottom: 6px;
 }
 
-.path-editor {
-  width: 100%;
-}
-
-.path-empty {
+.field-state {
   font-size: 12px;
   color: var(--el-text-color-secondary);
-  margin-bottom: 6px;
 }
 
 .owner-offline-hint {
@@ -367,20 +490,40 @@ function confirmPicker() {
   margin-top: 6px;
 }
 
-.path-empty-inline {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-
-.path-tags {
-  margin-bottom: 6px;
-}
-
 .path-actions {
+  margin-left: auto;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 4px;
+}
+
+.help-caret {
+  margin-left: 2px;
+  font-size: 12px;
+}
+
+.path-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+
+  // 长路径折行，避免撑破窄容器
+  :deep(.el-tag) {
+    max-width: 100%;
+    height: auto;
+    line-height: 1.6;
+    white-space: normal;
+    word-break: break-all;
+  }
+}
+
+.field-help {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
 }
 
 .picker-hint {
@@ -392,8 +535,16 @@ function confirmPicker() {
 .exclude-input-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 4px;
-  margin-top: 4px;
+  margin-top: 6px;
+}
+
+.exclude-input {
+  flex: 1 1 200px;
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .preset-row {

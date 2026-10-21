@@ -33,17 +33,101 @@ use crate::share_sync::scheduler::{describe_schedule, SubscriptionScheduler};
 use crate::share_sync::snapshot::{
     CapturedShare, ScanCache, ScanProgressSink, ShareSnapshot, ShareSnapshotItem, SnapshotCollector,
 };
-use crate::share_sync::types::{ConflictStrategy, RunStatus};
+use crate::share_sync::types::{ConflictStrategy, DiffSummary, RunStatus};
 use crate::transfer::{TransferManager, TransferStatus};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+/// 扫描阶段的阶段标记（原子状态机）。
+///
+/// 取消只接受「扫描中」这一个阶段：一旦进入执行阶段就必须拒绝取消，
+/// 否则会取消掉已经开始的转存/下载。
+const SCAN_STAGE_SCANNING: u8 = 0;
+const SCAN_STAGE_EXECUTING: u8 = 1;
+const SCAN_STAGE_CANCELLED: u8 = 2;
+
+/// 一轮扫描的可取消句柄。
+///
+/// `run_id` 用于把取消请求绑定到用户看到的那一轮：身份不符的迟到请求不得取消新一轮。
+#[derive(Clone)]
+struct ScanHandle {
+    run_id: String,
+    token: CancellationToken,
+    /// 阶段状态机（扫描中 / 执行中 / 已取消）
+    stage: Arc<AtomicU8>,
+}
+
+impl ScanHandle {
+    fn new(run_id: String) -> Self {
+        Self {
+            run_id,
+            token: CancellationToken::new(),
+            stage: Arc::new(AtomicU8::new(SCAN_STAGE_SCANNING)),
+        }
+    }
+
+    /// 是否仍处于「扫描中」
+    fn is_scanning(&self) -> bool {
+        self.stage.load(Ordering::Acquire) == SCAN_STAGE_SCANNING
+    }
+
+    /// 抢占取消：只有仍处于「扫描中」才成功（CAS 原子）。
+    ///
+    /// 失败说明这一轮已进入执行阶段（或已被取消）—— 两种情况都不能再取消。
+    fn try_cancel(&self) -> bool {
+        self.stage
+            .compare_exchange(
+                SCAN_STAGE_SCANNING,
+                SCAN_STAGE_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// 推进到执行阶段；返回 false 表示这一轮已被取消 —— 不得再执行。
+    fn try_enter_executing(&self) -> bool {
+        self.stage
+            .compare_exchange(
+                SCAN_STAGE_SCANNING,
+                SCAN_STAGE_EXECUTING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
+/// RAII 守卫：run 结束时移除本轮登记的取消句柄。
+///
+/// 只移除按 `run_id` 比对属于本轮的那一个，否则旧 run 收尾会删掉新一轮的令牌，
+/// 新一轮就再也取消不了。
+struct ScanHandleGuard<'g> {
+    handles: &'g DashMap<String, ScanHandle>,
+    sub_id: String,
+    run_id: String,
+}
+
+impl Drop for ScanHandleGuard<'_> {
+    fn drop(&mut self) {
+        let is_mine = self
+            .handles
+            .get(&self.sub_id)
+            .map(|h| h.run_id == self.run_id)
+            .unwrap_or(false);
+        if is_mine {
+            self.handles.remove(&self.sub_id);
+        }
+    }
+}
 
 /// 顶层 Manager
 pub struct ShareSyncManager {
@@ -59,6 +143,8 @@ pub struct ShareSyncManager {
     /// 启动期待续跑、但 `resume_interrupted_runs` 还没处理到的订阅。在此集合里的订阅
     /// 不许起新一轮：新一轮开头的 `sweep_residual_subtasks` 会删掉待接管的残留下载。
     pending_resume: DashMap<String, ()>,
+    /// 订阅 ID → 本轮扫描的可取消句柄；run 结束即按 `run_id` 比对移除。
+    scan_handles: DashMap<String, ScanHandle>,
     /// 持久化层
     persistence: Arc<ShareSyncPersistence>,
     /// 配置文件路径（JSON）
@@ -128,6 +214,13 @@ pub enum TriggerOutcome {
     WokeResuming { run_id: String },
     /// 启动续跑还没处理到该订阅，本次不起新一轮（否则会清掉待接管的残留下载）
     PendingResume,
+}
+
+/// 取消扫描的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelOutcome {
+    /// 被取消的那一轮 run_id
+    pub run_id: String,
 }
 
 /// Manager 构造参数
@@ -243,6 +336,7 @@ impl ShareSyncManager {
             running: DashMap::new(),
             resuming: DashMap::new(),
             pending_resume: DashMap::new(),
+            scan_handles: DashMap::new(),
             persistence,
             config_path: cfg.config_path,
             publisher: cfg
@@ -1423,6 +1517,42 @@ impl ShareSyncManager {
         self.execute_one_with_run_id(id, None).await
     }
 
+    /// 取消**当前这一轮**的扫描。
+    ///
+    /// 只接受「扫描中」阶段：已进入执行阶段一律拒绝（`ScanNotCancellable` → 409），
+    /// 避免取消掉已经开始的转存/下载。
+    ///
+    /// `expected_run_id` 是用户界面上观察到的那一轮。身份比对在阶段 CAS **之前**：
+    /// 不匹配（含迟到的旧请求）即确定性冲突，且不触碰任何令牌，因此不会取消新一轮。
+    pub fn cancel_scan(
+        &self,
+        id: &str,
+        expected_run_id: &str,
+    ) -> Result<CancelOutcome, ShareSyncError> {
+        let handle = self
+            .scan_handles
+            .get(id)
+            .map(|h| h.clone())
+            .ok_or_else(|| {
+                ShareSyncError::ScanNotCancellable("当前没有正在进行的扫描，无法取消".into())
+            })?;
+        // 身份比对先于阶段 CAS：不符时连令牌都不碰。
+        if handle.run_id != expected_run_id {
+            return Err(ShareSyncError::ScanNotCancellable(
+                "扫描轮次已变化，无法取消（请刷新后重试）".into(),
+            ));
+        }
+        if !handle.try_cancel() {
+            return Err(ShareSyncError::ScanNotCancellable(
+                "该轮同步已进入执行阶段，无法取消扫描".into(),
+            ));
+        }
+        handle.token.cancel();
+        Ok(CancelOutcome {
+            run_id: handle.run_id,
+        })
+    }
+
     /// `execute_one` 的内部版本：当 `given_run_id` 为 `Some(rid)` 时，复用预先生成的
     /// run_id（不再重新 mint），跳过 `start_run` / `RunStarted` 广播——用于 `trigger_one`
     /// 这类"已经让前端拿到 run_id"的入口；为 `None` 时由本函数自管整个 run 生命周期。
@@ -1545,8 +1675,19 @@ impl ShareSyncManager {
             }
         };
 
+        // 必须在扫描开始**之前**登记，否则扫描已开始但还不可取消。
+        let scan_handle = ScanHandle::new(run_id.clone());
+        self.scan_handles
+            .insert(id.to_string(), scan_handle.clone());
+
+        // 守卫在收尾时按 `run_id` 只移除本轮登记的句柄。
+        let _scan_handle_guard = ScanHandleGuard {
+            handles: &self.scan_handles,
+            sub_id: id.to_string(),
+            run_id: run_id.clone(),
+        };
+
         // 0) 清掉上一轮遗留的、没人再驱动的内部子任务。
-        //
         // 到这里 `running` 已被本次 run 独占（`resume_run_in_place` 走同一把守卫），
         // 所以此刻还挂在本订阅名下的转存/下载任务必然是**孤儿**：上一轮 run 已经
         // 结束（超时、失败、或进程被杀后没走到启动续跑），没有任何 run 在等它们。
@@ -1624,56 +1765,87 @@ impl ShareSyncManager {
             .persistence
             .update_run_phase(&run_id, RUN_PHASE_SCANNING);
 
-        let (captured, curr_snapshot) = loop {
-            scan_attempt.store(snapshot_attempt + 1, Ordering::Relaxed);
-            let attempt_result = match SnapshotCollector::from_url(
-                netdisk.as_ref(),
-                &sub.share_url,
-                sub.password.clone(),
-                sub.include_paths.clone(),
-                sub.exclude_patterns.clone(),
-                // 列目录抓快照与转存提交共用同一个全局风控限速器
-                self.rate_limiter.clone(),
-            )
-            .await
-            {
-                Ok(collector) => collector
-                    .with_progress(Arc::clone(&scan_sink))
-                    .with_cache(Arc::clone(&scan_cache))
-                    .collect()
-                    .await
-                    .map_err(|e| ("抓取失败", e)),
-                Err(e) => Err(("抓取初始化失败", e)),
+        let (captured, curr_snapshot) = {
+            let scan_token = scan_handle.token.clone();
+            let collector_token = scan_token.clone();
+            // 用 select 让取消信号与整个扫描 future 竞争，可打断请求、重试退避与限速等待。
+            let outcome = tokio::select! {
+                biased;
+                _ = scan_token.cancelled() => Err(ShareSyncError::ScanCancelled("用户取消扫描".into())),
+                r = async {
+                    loop {
+                        scan_attempt.store(snapshot_attempt + 1, Ordering::Relaxed);
+                        let attempt_result = match SnapshotCollector::from_url(
+                            netdisk.as_ref(),
+                            &sub.share_url,
+                            sub.password.clone(),
+                            sub.include_paths.clone(),
+                            sub.exclude_patterns.clone(),
+                            sub.exclude_paths.clone(),
+                            // 列目录抓快照与转存提交共用同一个全局风控限速器
+                            self.rate_limiter.clone(),
+                        )
+                        .await
+                        {
+                            Ok(collector) => collector
+                                .with_progress(Arc::clone(&scan_sink))
+                                .with_cache(Arc::clone(&scan_cache))
+                                .with_cancel(collector_token.clone())
+                                .collect()
+                                .await
+                                .map_err(|e| ("抓取失败", e)),
+                            Err(e) => Err(("抓取初始化失败", e)),
+                        };
+
+                        match attempt_result {
+                            Ok(t) => break Ok(t),
+                            // 取消不是失败：不再重试，直接以「已取消」收尾
+                            Err((_stage, e)) if matches!(e, ShareSyncError::ScanCancelled(_)) => {
+                                break Err(e)
+                            }
+                            Err((stage, e)) if e.should_retry() && snapshot_attempt < snapshot_max_retries => {
+                                let backoff = snapshot_base_delay_ms.saturating_mul(1u64 << snapshot_attempt);
+                                warn!(
+                                    "share-sync: {} 临时失败，{}ms 后重试 subscription={} run_id={} attempt={}/{} cached_dirs={} err={}",
+                                    stage,
+                                    backoff,
+                                    id,
+                                    run_id,
+                                    snapshot_attempt + 1,
+                                    snapshot_max_retries,
+                                    // 已缓存的目录数 = 下一轮可跳过的请求数，用来观察续爬是否生效
+                                    scan_cache.len(),
+                                    e
+                                );
+                                if backoff > 0 {
+                                    tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                                }
+                                snapshot_attempt += 1;
+                            }
+                            Err((stage, e)) => {
+                                self.fail_run(&run_id, id, owner_uid, &format!("{}: {}", stage, e));
+                                self.maybe_note_link_failure(id, &e);
+                                break Err(e);
+                            }
+                        }
+                    }
+                } => r,
             };
 
-            match attempt_result {
-                Ok(t) => break t,
-                Err((stage, e)) if e.should_retry() && snapshot_attempt < snapshot_max_retries => {
-                    let backoff = snapshot_base_delay_ms.saturating_mul(1u64 << snapshot_attempt);
-                    warn!(
-                        "share-sync: {} 临时失败，{}ms 后重试 subscription={} run_id={} attempt={}/{} cached_dirs={} err={}",
-                        stage,
-                        backoff,
-                        id,
-                        run_id,
-                        snapshot_attempt + 1,
-                        snapshot_max_retries,
-                        // 已缓存的目录数 = 下一轮可跳过的请求数，用来观察续爬是否生效
-                        scan_cache.len(),
-                        e
-                    );
-                    if backoff > 0 {
-                        tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
-                    }
-                    snapshot_attempt += 1;
+            match outcome {
+                Ok(v) => v,
+                Err(ShareSyncError::ScanCancelled(_)) => {
+                    self.finish_cancelled_run(&run_id, id, owner_uid);
+                    return Err(ShareSyncError::ScanCancelled("用户取消扫描".into()));
                 }
-                Err((stage, e)) => {
-                    self.fail_run(&run_id, id, owner_uid, &format!("{}: {}", stage, e));
-                    self.maybe_note_link_failure(id, &e);
-                    return Err(e);
-                }
+                Err(e) => return Err(e),
             }
         };
+        // 扫描刚结束的瞬间可能正好收到取消：此刻还没有 diff / 执行，必须就此终止。
+        if !scan_handle.is_scanning() {
+            self.finish_cancelled_run(&run_id, id, owner_uid);
+            return Err(ShareSyncError::ScanCancelled("用户取消扫描".into()));
+        }
         // 成功抓取到分享内容 → 链接可用，归零失效计数（如曾标记失效也清除）。
         self.clear_link_failure(id);
         let _ = self
@@ -1726,6 +1898,12 @@ impl ShareSyncManager {
         });
 
         // 4) 执行
+        //
+        // 推进阶段失败说明已被取消：不得执行转存/下载，也不得推进快照基线。
+        if !scan_handle.try_enter_executing() {
+            self.finish_cancelled_run(&run_id, id, owner_uid);
+            return Err(ShareSyncError::ScanCancelled("用户取消扫描".into()));
+        }
         let _ = self
             .persistence
             .update_run_phase(&run_id, RUN_PHASE_EXECUTING);
@@ -1928,6 +2106,31 @@ impl ShareSyncManager {
             hist,
             residual.join(", ")
         );
+    }
+
+    /// 把被用户取消的 run 收尾成 `cancelled`（**不是**失败）。
+    ///
+    /// 取消不是错误：不计链接失效、不重试、不推进快照基线，候选快照一并作废。
+    fn finish_cancelled_run(&self, run_id: &str, sub_id: &str, owner_uid: u64) {
+        let now = chrono::Utc::now().timestamp();
+        // run 行可能还没落库（trigger 预建的行已在库里，这里兜底补一行）
+        let _ = self.persistence.start_run(run_id, sub_id, now);
+        let _ = self.persistence.finish_run(
+            run_id,
+            now,
+            RunStatus::Cancelled,
+            &DiffSummary::default(),
+            None,
+        );
+        // 候选快照作废：取消不会推进基线
+        if let Err(e) = self.persistence.delete_snapshot_for_run(run_id) {
+            warn!("清理候选快照失败: run_id={}, error={}", run_id, e);
+        }
+        self.publisher.publish(ShareSyncEvent::RunCancelled {
+            run_id: run_id.into(),
+            subscription_id: sub_id.into(),
+            owner_uid,
+        });
     }
 
     fn fail_run(&self, run_id: &str, sub_id: &str, owner_uid: u64, err: &str) {
@@ -5095,5 +5298,160 @@ mod tests {
         t.note_started_at(100);
         t.note_started_at(300);
         assert_eq!(t.earliest_started_at, Some(100));
+    }
+
+    // ==================== 扫描取消 ====================
+
+    async fn manager_for_cancel_tests(dir: &std::path::Path) -> Arc<ShareSyncManager> {
+        ShareSyncManager::new(ManagerConfig {
+            config_path: dir.join("subs.json"),
+            db_path: dir.join("s.db"),
+            resolver: Arc::new(StaticAccountResolver::none()),
+            publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
+        })
+        .await
+        .unwrap()
+    }
+
+    /// 没有扫描在跑时取消 → 确定性冲突（前端据此提示「无法取消」）。
+    #[tokio::test]
+    async fn test_cancel_scan_without_active_scan_conflicts() {
+        let dir = tempdir().unwrap();
+        let m = manager_for_cancel_tests(dir.path()).await;
+        let s = m.create_subscription(sub("a")).unwrap();
+        let err = m.cancel_scan(&s.id, "run-x").unwrap_err();
+        assert!(
+            matches!(err, ShareSyncError::ScanNotCancellable(_)),
+            "无扫描时必须返回冲突，实际: {:?}",
+            err
+        );
+    }
+
+    /// 取消只作用于**当前这一轮**：令牌被触发，重复取消变成冲突。
+    #[tokio::test]
+    async fn test_cancel_scan_cancels_current_run_only() {
+        let dir = tempdir().unwrap();
+        let m = manager_for_cancel_tests(dir.path()).await;
+        let s = m.create_subscription(sub("a")).unwrap();
+        let handle = ScanHandle::new("run-1".to_string());
+        let token = handle.token.clone();
+        m.scan_handles.insert(s.id.clone(), handle);
+
+        let out = m.cancel_scan(&s.id, "run-1").unwrap();
+        assert_eq!(out.run_id, "run-1");
+        assert!(token.is_cancelled(), "取消必须触发本轮的令牌");
+        // 重复取消：已被取消，不再是「扫描中」→ 冲突（不会二次触发）
+        assert!(matches!(
+            m.cancel_scan(&s.id, "run-1"),
+            Err(ShareSyncError::ScanNotCancellable(_))
+        ));
+    }
+
+    /// 迟到的旧取消请求不得取消新一轮的扫描：run 身份必须先比对、再做阶段 CAS。
+    #[tokio::test]
+    async fn test_cancel_scan_rejects_mismatched_run_id() {
+        let dir = tempdir().unwrap();
+        let m = manager_for_cancel_tests(dir.path()).await;
+        let s = m.create_subscription(sub("a")).unwrap();
+        let handle = ScanHandle::new("run-new".to_string());
+        let token = handle.token.clone();
+        m.scan_handles.insert(s.id.clone(), handle);
+
+        // 上一轮的取消请求迟到（run-old ≠ 当前登记的 run-new）→ 确定性冲突
+        let err = m.cancel_scan(&s.id, "run-old").unwrap_err();
+        assert!(
+            matches!(err, ShareSyncError::ScanNotCancellable(_)),
+            "轮次不匹配必须是冲突，实际: {:?}",
+            err
+        );
+        assert!(!token.is_cancelled(), "轮次不匹配时不得触发新一轮的令牌");
+
+        // 缺失身份（空串）同样不取消任何一轮
+        assert!(matches!(
+            m.cancel_scan(&s.id, ""),
+            Err(ShareSyncError::ScanNotCancellable(_))
+        ));
+        assert!(!token.is_cancelled());
+
+        // 身份一致才接受
+        let out = m.cancel_scan(&s.id, "run-new").unwrap();
+        assert_eq!(out.run_id, "run-new");
+        assert!(token.is_cancelled());
+    }
+
+    /// 进入执行阶段后不再接受取消（否则会取消掉已经开始的转存/下载）。
+    #[tokio::test]
+    async fn test_cancel_scan_rejected_after_executing_started() {
+        let dir = tempdir().unwrap();
+        let m = manager_for_cancel_tests(dir.path()).await;
+        let s = m.create_subscription(sub("a")).unwrap();
+        let handle = ScanHandle::new("run-2".to_string());
+        assert!(handle.try_enter_executing(), "应能从扫描中推进到执行中");
+        m.scan_handles.insert(s.id.clone(), handle);
+
+        let err = m.cancel_scan(&s.id, "run-2").unwrap_err();
+        assert!(
+            matches!(err, ShareSyncError::ScanNotCancellable(_)),
+            "执行阶段必须拒绝取消，实际: {:?}",
+            err
+        );
+    }
+
+    /// 旧一轮收尾时不得删掉新一轮登记的令牌（否则新一轮再也取消不了）。
+    #[test]
+    fn test_stale_scan_handle_guard_keeps_newer_run_token() {
+        let handles: DashMap<String, ScanHandle> = DashMap::new();
+        let newer = ScanHandle::new("run-new".to_string());
+        let newer_token = newer.token.clone();
+        handles.insert("sub-1".to_string(), newer);
+
+        // 旧一轮的守卫收尾：run_id 不匹配 → 不得移除
+        {
+            let _guard = ScanHandleGuard {
+                handles: &handles,
+                sub_id: "sub-1".to_string(),
+                run_id: "run-old".to_string(),
+            };
+        }
+        assert!(
+            handles.contains_key("sub-1"),
+            "旧轮的守卫不得删掉新一轮的句柄"
+        );
+        assert!(!newer_token.is_cancelled(), "新一轮的令牌不得被触发");
+
+        // 本轮的守卫收尾：run_id 匹配 → 移除
+        {
+            let _guard = ScanHandleGuard {
+                handles: &handles,
+                sub_id: "sub-1".to_string(),
+                run_id: "run-new".to_string(),
+            };
+        }
+        assert!(!handles.contains_key("sub-1"), "本轮的句柄应被移除");
+    }
+
+    /// 被取消的 run 落库为 `cancelled`（不是 `failed`），不计入链接失效，
+    /// 也不会被启动期「中断 run 接管」误收编。
+    #[tokio::test]
+    async fn test_cancelled_run_is_not_failed_and_not_resumable() {
+        let dir = tempdir().unwrap();
+        let m = manager_for_cancel_tests(dir.path()).await;
+        let s = m.create_subscription(sub("a")).unwrap();
+        m.persistence.start_run("run-c", &s.id, 100).unwrap();
+
+        m.finish_cancelled_run("run-c", &s.id, 1);
+
+        let rec = m.persistence.get_run("run-c").unwrap().unwrap();
+        assert_eq!(rec.status, "cancelled", "取消必须记为 cancelled");
+        assert!(rec.error.is_none(), "取消不是失败，不该带错误信息");
+        assert!(rec.phase.is_none(), "终态 run 的阶段应清空");
+        // 取消的 run 不会被启动续跑当成「待接管的中断 run」
+        let interrupted = m.persistence.list_interrupted_runs(3).unwrap();
+        assert!(
+            interrupted.iter().all(|r| r.run_id != "run-c"),
+            "取消的 run 不该进入续跑候选"
+        );
+        // 订阅本身不受影响：仍启用、可再次触发
+        assert!(m.get_subscription(&s.id).unwrap().enabled);
     }
 }

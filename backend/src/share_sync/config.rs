@@ -189,6 +189,9 @@ pub struct ShareSubscription {
     /// 排除 glob 模式列表
     #[serde(default)]
     pub exclude_patterns: Vec<String>,
+    /// 精确排除的目录路径（相对分享根）：连同全部内容排除，且不再递归列举。
+    #[serde(default)]
+    pub exclude_paths: Vec<String>,
     /// 同步目标（至少 1 个）
     pub targets: Vec<SyncTarget>,
     /// 订阅级冲突策略（各目标可单独覆盖）
@@ -238,6 +241,7 @@ impl ShareSubscription {
             password: None,
             include_paths: Vec::new(),
             exclude_patterns: Vec::new(),
+            exclude_paths: Vec::new(),
             targets,
             conflict_strategy: ConflictStrategy::default(),
             delete_missing: false,
@@ -448,6 +452,9 @@ pub struct CreateShareSubscriptionRequest {
     pub include_paths: Vec<String>,
     #[serde(default)]
     pub exclude_patterns: Vec<String>,
+    /// 精确排除的目录路径（相对分享根）；缺省为空 = 不排除。
+    #[serde(default)]
+    pub exclude_paths: Vec<String>,
     pub targets: Vec<SyncTarget>,
     #[serde(default)]
     pub conflict_strategy: Option<ConflictStrategy>,
@@ -468,6 +475,7 @@ impl CreateShareSubscriptionRequest {
         sub.password = self.password;
         sub.include_paths = self.include_paths;
         sub.exclude_patterns = self.exclude_patterns;
+        sub.exclude_paths = self.exclude_paths;
         if let Some(s) = self.conflict_strategy {
             sub.conflict_strategy = s;
         }
@@ -494,6 +502,8 @@ pub struct UpdateShareSubscriptionRequest {
     pub include_paths: Option<Vec<String>>,
     #[serde(default)]
     pub exclude_patterns: Option<Vec<String>>,
+    #[serde(default)]
+    pub exclude_paths: Option<Vec<String>>,
     #[serde(default)]
     pub targets: Option<Vec<SyncTarget>>,
     #[serde(default)]
@@ -900,6 +910,7 @@ mod tests {
             password: Some("1234".into()),
             include_paths: vec!["/a".into()],
             exclude_patterns: vec![],
+            exclude_paths: vec!["/a/tmp".into()],
             targets: vec![SyncTarget::Netdisk(NetdiskTarget {
                 remote_path: "/y".into(),
                 save_fs_id: 0,
@@ -925,5 +936,43 @@ mod tests {
         assert_eq!(sub.conflict_strategy, ConflictStrategy::Skip);
         assert_eq!(sub.poll_config.mode, PollMode::Scheduled);
         assert_eq!(sub.poll_config.schedule_hour, Some(3));
+        assert_eq!(sub.exclude_paths, vec!["/a/tmp".to_string()]);
+    }
+
+    /// 老订阅没有 exclude_paths 字段，必须仍能反序列化。
+    #[test]
+    fn test_subscription_without_exclude_paths_deserializes() {
+        let json = r#"{
+            "id": "s1",
+            "name": "t",
+            "share_url": "https://pan.baidu.com/s/1y7CluAbCdEfGh",
+            "include_paths": ["/a"],
+            "exclude_patterns": ["*.tmp"],
+            "targets": [],
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let sub: ShareSubscription = serde_json::from_str(json).unwrap();
+        assert!(sub.exclude_paths.is_empty());
+        assert_eq!(sub.include_paths, vec!["/a".to_string()]);
+        assert_eq!(sub.exclude_patterns, vec!["*.tmp".to_string()]);
+    }
+
+    /// 精确目录排除随订阅序列化往返，编辑后不丢失。
+    #[test]
+    fn test_exclude_paths_roundtrip() {
+        let mut sub = ShareSubscription::new(
+            "t".into(),
+            "https://pan.baidu.com/s/1y7CluAbCdEfGh".into(),
+            vec![SyncTarget::Netdisk(NetdiskTarget {
+                remote_path: "/x".into(),
+                save_fs_id: 0,
+                conflict_strategy: None,
+            })],
+        );
+        sub.exclude_paths = vec!["/剧集/S01".into()];
+        let json = serde_json::to_string(&sub).unwrap();
+        let back: ShareSubscription = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.exclude_paths, vec!["/剧集/S01".to_string()]);
     }
 }

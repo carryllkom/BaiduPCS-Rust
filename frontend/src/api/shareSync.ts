@@ -63,6 +63,8 @@ export interface ShareSubscription {
   password?: string | null
   include_paths: string[]
   exclude_patterns: string[]
+  /** 精确排除的目录路径（相对分享根）；命中的目录连同其中全部内容一起排除 */
+  exclude_paths: string[]
   targets: SyncTarget[]
   conflict_strategy: ConflictStrategy
   delete_missing: boolean
@@ -86,6 +88,8 @@ export interface CreateShareSubscriptionRequest {
   password?: string | null
   include_paths?: string[]
   exclude_patterns?: string[]
+  /** 精确排除的目录路径（相对分享根） */
+  exclude_paths?: string[]
   targets: SyncTarget[]
   conflict_strategy?: ConflictStrategy
   delete_missing?: boolean
@@ -100,6 +104,8 @@ export interface UpdateShareSubscriptionRequest {
   password?: string | null
   include_paths?: string[]
   exclude_patterns?: string[]
+  /** 精确排除的目录路径（相对分享根） */
+  exclude_paths?: string[]
   targets?: SyncTarget[]
   conflict_strategy?: ConflictStrategy
   delete_missing?: boolean
@@ -238,6 +244,16 @@ export interface TriggerSubscriptionResponse {
 }
 
 /**
+ * 取消扫描的结果。只有扫描阶段可取消。
+ */
+export interface CancelScanResponse {
+  subscription_id: string
+  /** 被取消的那一轮 run_id */
+  run_id: string
+  cancelled: boolean
+}
+
+/**
  * 分享同步 WS 事件载荷（与后端 ShareSyncEvent 对齐）
  */
 export type ShareSyncWsEvent =
@@ -273,6 +289,7 @@ export type ShareSyncWsEvent =
 }
     | { type: 'run_completed'; run_id: string; subscription_id: string; added: number; modified: number; removed: number; failed: number; owner_uid?: number }
     | { type: 'run_failed'; run_id: string; subscription_id: string; error: string; owner_uid?: number }
+    | { type: 'run_cancelled'; run_id: string; subscription_id: string; owner_uid?: number }
     | {
   type: 'item_progress'
   run_id: string
@@ -334,6 +351,18 @@ export async function triggerSubscription(id: string): Promise<TriggerSubscripti
 /** 「我已更新链接，恢复」：清除链接失效标记，恢复轮询并立即重试一次 */
 export async function resumeSubscription(id: string): Promise<void> {
   await rawApiClient.post(`${BASE}/subscriptions/${id}/resume`)
+}
+
+/**
+ * 取消当前扫描（不影响订阅本身）。`runId` 是用户观察到的那一轮，后端先比对
+ * run 身份再取消，迟到请求不会取消新一轮；不可取消时返回 409。
+ */
+export async function cancelScan(id: string, runId: string): Promise<CancelScanResponse> {
+  const r = await rawApiClient.post<{ success: boolean; data: CancelScanResponse }>(
+      `${BASE}/subscriptions/${id}/cancel-scan`,
+      { run_id: runId }
+  )
+  return r.data.data
 }
 
 export async function listRuns(id: string, page = 1, pageSize = 20): Promise<RunRecord[]> {
