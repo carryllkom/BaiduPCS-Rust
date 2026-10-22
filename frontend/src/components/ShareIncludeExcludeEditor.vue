@@ -148,27 +148,32 @@
             @close="removeRegex(i)"
         ><span class="rule-kind">正则</span>{{ p }}</el-tag>
       </div>
-      <div class="rule-kind-row">
-        <el-radio-group v-model="ruleKind" size="small" aria-label="新增规则类型">
-          <el-radio-button value="glob">通配符</el-radio-button>
-          <el-radio-button value="regex" :disabled="!regexSupported">正则表达式</el-radio-button>
-        </el-radio-group>
-        <span v-if="!regexSupported && regexReady" class="rule-kind-hint">当前后端仅支持通配符</span>
-      </div>
       <div class="exclude-input-row">
-        <el-input
-            v-model="excludeInput"
-            class="exclude-input"
-            type="textarea"
-            :autosize="{ minRows: 1, maxRows: 4 }"
-            resize="none"
-            size="small"
-            :placeholder="ruleKind === 'regex' ? '输入正则，每行一条' : '输入规则，每行一条'"
-            :aria-label="ruleKind === 'regex' ? '输入正则排除规则' : '输入通配符排除规则'"
-            @keydown.enter="onExcludeEnter"
-        />
+        <div class="rule-input-group">
+          <el-select
+              v-model="ruleKind"
+              class="rule-kind-select"
+              size="small"
+              aria-label="新增规则类型"
+          >
+            <el-option label="通配符" value="glob" />
+            <el-option label="正则表达式" value="regex" :disabled="!regexSupported" />
+          </el-select>
+          <el-input
+              v-model="excludeInput"
+              class="exclude-input"
+              type="textarea"
+              :autosize="{ minRows: 1, maxRows: 4 }"
+              resize="none"
+              size="small"
+              :placeholder="ruleKind === 'regex' ? '输入正则，每行一条' : '输入规则，每行一条'"
+              :aria-label="ruleKind === 'regex' ? '输入正则排除规则' : '输入通配符排除规则'"
+              @keydown.enter="onExcludeEnter"
+          />
+        </div>
         <el-button size="small" plain type="primary" :loading="validating" @click="addExclude">添加</el-button>
       </div>
+      <div v-if="!regexSupported && regexReady" class="rule-kind-hint">当前后端仅支持通配符</div>
       <p v-if="ruleError" class="rule-error" role="alert">{{ ruleError }}</p>
       <div v-if="showRuleTest" class="rule-test">
         <div class="rule-test-title">测试已添加规则（不含同步范围与精确排除目录）</div>
@@ -840,15 +845,8 @@ function confirmPicker() {
   color: var(--el-text-color-secondary);
 }
 
-.rule-kind-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px 8px;
-  margin-top: 6px;
-}
-
 .rule-kind-hint {
+  margin-top: 4px;
   font-size: 12px;
   color: var(--el-text-color-secondary);
 }
@@ -913,11 +911,36 @@ function confirmPicker() {
   margin-top: 6px;
 }
 
-.exclude-input {
+// 类型下拉框与规则输入框始终并排：窄屏只允许「添加」换行，二者不拆开。
+.rule-input-group {
+  display: flex;
+  align-items: center;
   flex: 1 1 200px;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.rule-kind-select {
+  flex: 0 0 auto;
+  width: 104px;
+}
+
+// 与单行规则输入框等高，桌面端下拉框/输入框/添加按钮顶边与中线对齐
+.rule-kind-select :deep(.el-select__wrapper) {
+  min-height: 28px;
+}
+
+.exclude-input {
+  flex: 1 1 0;
   width: auto;
   min-width: 0;
   max-width: 100%;
+}
+
+// 「添加」与下拉框/输入框同高，桌面端三者顶边与中线都对齐
+.exclude-input-row > .el-button {
+  min-height: 28px;
 }
 
 .preset-row {

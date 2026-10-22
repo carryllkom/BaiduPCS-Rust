@@ -490,28 +490,44 @@ describe('ShareIncludeExcludeEditor 正则规则', () => {
   const addButton = () =>
       Array.from(rulesBlock().querySelectorAll<HTMLButtonElement>('.exclude-input-row button'))
           .find((b) => b.textContent?.trim() === '添加')!
-  const kindRadios = () =>
-      Array.from(rulesBlock().querySelectorAll<HTMLElement>('.rule-kind-row .el-radio-button'))
+  const kindSelect = () => rulesBlock().querySelector<HTMLElement>('.rule-kind-select')!
+  const kindOptions = () =>
+      Array.from(document.body.querySelectorAll<HTMLElement>('.el-select-dropdown__item:not(.is-disabled-hidden)'))
   const regexTags = () =>
       Array.from(rulesBlock().querySelectorAll<HTMLElement>('.path-tags .el-tag'))
           .filter((el) => el.textContent?.includes('正则'))
 
-  /** 切换新增规则类型（Element Plus 单选按钮的原生 input 承载变更事件） */
-  async function selectKind(index: 0 | 1) {
-    const input = kindRadios()[index].querySelector<HTMLInputElement>('input')!
-    input.click()
+  /** 打开真实下拉框并选择新增规则类型 */
+  async function selectKind(kind: 'glob' | 'regex') {
+    kindSelect().querySelector<HTMLElement>('.el-select__wrapper')!.click()
+    await flushPromises()
+    const label = kind === 'regex' ? '正则表达式' : '通配符'
+    const option = kindOptions().find((o) => o.textContent?.trim() === label)
+    expect(option, `下拉框应有「${label}」选项`).toBeTruthy()
+    option!.click()
     await flushPromises()
   }
 
-  it('默认类型为通配符，能力确认后可选正则', async () => {
+  it('规则类型是输入行内的真实下拉框，默认通配符且无分段单选', async () => {
     const wrapper = mountEditor()
     await flushPromises()
 
-    const [globRadio, regexRadio] = kindRadios()
-    expect(globRadio.textContent?.trim()).toBe('通配符')
-    expect(globRadio.classList.contains('is-active')).toBe(true)
-    expect(regexRadio.querySelector('input')?.disabled, '能力可用时正则可选').toBe(false)
+    expect(rulesBlock().querySelector('.rule-kind-row'), '不应再有独立的类型行').toBeNull()
+    expect(rulesBlock().querySelector('.el-radio-group, .el-radio-button'), '不应再有分段单选').toBeNull()
+    const select = kindSelect()
+    expect(select.querySelector('[role="combobox"]'), '规则类型必须是 combobox').toBeTruthy()
+    expect(select.textContent).toContain('通配符')
+    expect(
+        select.compareDocumentPosition(ruleInput()),
+        '下拉框必须在规则输入框之前',
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
     expect(ruleInput().getAttribute('placeholder')).toBe('输入规则，每行一条')
+
+    // 下拉选项：两项齐全，能力可用时正则可选
+    select.querySelector<HTMLElement>('.el-select__wrapper')!.click()
+    await flushPromises()
+    expect(kindOptions().map((o) => o.textContent?.trim())).toEqual(['通配符', '正则表达式'])
+    expect(kindOptions()[1].classList.contains('is-disabled'), '能力可用时正则可选').toBe(false)
     wrapper.unmount()
   })
 
@@ -522,8 +538,12 @@ describe('ShareIncludeExcludeEditor 正则规则', () => {
     const wrapper = mountEditor({ excludeRegexPatterns: ['^/股票/.*$'] })
     await flushPromises()
 
-    const [, regexRadio] = kindRadios()
-    expect(regexRadio.querySelector('input')?.disabled, '404 时应禁用正则选项').toBe(true)
+    kindSelect().querySelector<HTMLElement>('.el-select__wrapper')!.click()
+    await flushPromises()
+    expect(kindOptions()[1].classList.contains('is-disabled'), '404 时应禁用正则选项').toBe(true)
+    expect(kindSelect().textContent, '未确认能力时保持通配符').toContain('通配符')
+    document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    await flushPromises()
     expect(rulesBlock().textContent).toContain('当前后端仅支持通配符')
     expect(regexTags()).toHaveLength(1)
 
@@ -535,11 +555,34 @@ describe('ShareIncludeExcludeEditor 正则规则', () => {
     wrapper.unmount()
   })
 
+  it('类型选择只影响之后新增的规则，不迁移或改写已有标签', async () => {
+    const wrapper = mountEditor({
+      excludePatterns: ['*.tmp'],
+      excludeRegexPatterns: ['^/a$'],
+    })
+    await flushPromises()
+
+    await selectKind('regex')
+    // 两种既有标签都保留在各自模型里，切换类型不会搬动它们
+    expect(rulesBlock().querySelectorAll('.path-tags .el-tag')).toHaveLength(2)
+
+    await selectKind('glob')
+    ruleInput().value = '*.bak'
+    ruleInput().dispatchEvent(new Event('input'))
+    await flushPromises()
+    addButton().click()
+    await flushPromises()
+
+    expect(wrapper.emitted('update:excludePatterns')![0][0]).toEqual(['*.tmp', '*.bak'])
+    expect(wrapper.emitted('update:excludeRegexPatterns'), '切换类型不得改写既有正则').toBeUndefined()
+    wrapper.unmount()
+  })
+
   it('切换类型后输入框提示与可访问名随之变化', async () => {
     const wrapper = mountEditor()
     await flushPromises()
 
-    await selectKind(1)
+    await selectKind('regex')
 
     expect(ruleInput().getAttribute('placeholder')).toBe('输入正则，每行一条')
     expect(ruleInput().getAttribute('aria-label')).toBe('输入正则排除规则')
@@ -549,7 +592,7 @@ describe('ShareIncludeExcludeEditor 正则规则', () => {
   it('新增正则先整批校验，通过后仅发出 regex 模型', async () => {
     const wrapper = mountEditor()
     await flushPromises()
-    await selectKind(1)
+    await selectKind('regex')
 
     ruleInput().value = '^/股票/按月归档/2025.*$'
     ruleInput().dispatchEvent(new Event('input'))
@@ -579,7 +622,7 @@ describe('ShareIncludeExcludeEditor 正则规则', () => {
     })
     const wrapper = mountEditor()
     await flushPromises()
-    await selectKind(1)
+    await selectKind('regex')
 
     ruleInput().value = '^/ok$'
     ruleInput().dispatchEvent(new Event('input'))
@@ -602,7 +645,7 @@ describe('ShareIncludeExcludeEditor 正则规则', () => {
     }))
     const wrapper = mountEditor()
     await flushPromises()
-    await selectKind(1)
+    await selectKind('regex')
 
     ruleInput().value = '^/旧$'
     ruleInput().dispatchEvent(new Event('input'))
@@ -629,7 +672,7 @@ describe('ShareIncludeExcludeEditor 正则规则', () => {
     }))
     const wrapper = mountEditor()
     await flushPromises()
-    await selectKind(1)
+    await selectKind('regex')
 
     ruleInput().value = '^/a$'
     ruleInput().dispatchEvent(new Event('input'))
@@ -731,7 +774,7 @@ describe('ShareIncludeExcludeEditor 正则规则', () => {
     config.regexPresetRules = ['^/基金/.*$']
     const wrapper = mountEditor()
     await flushPromises()
-    await selectKind(1)
+    await selectKind('regex')
 
     const chip = rulesBlock().querySelector<HTMLElement>('.preset-tag .el-tag')!
     expect(chip.textContent?.trim()).toBe('^/基金/.*$')
@@ -747,7 +790,7 @@ describe('ShareIncludeExcludeEditor 正则规则', () => {
     config.regexPresetRules = []
     const wrapper = mountEditor({ excludeRegexPatterns: ['^/股票/.*$'] })
     await flushPromises()
-    await selectKind(1)
+    await selectKind('regex')
 
     const saveBtn = Array.from(rulesBlock().querySelectorAll<HTMLButtonElement>('.preset-row button'))
         .find((b) => b.textContent?.trim() === '存为常用')!
@@ -893,10 +936,13 @@ describe('ShareIncludeExcludeEditor 试匹配结果快照（F1）', () => {
 describe('ShareIncludeExcludeEditor 词表点选保留草稿（F3）', () => {
   const rulesBlock = () => fieldBlock('排除规则')
   const textarea = () => rulesBlock().querySelector<HTMLTextAreaElement>('.exclude-input textarea')!
-  const selectKind = async (index: 0 | 1) => {
-    const input = rulesBlock()
-        .querySelectorAll<HTMLInputElement>('.rule-kind-row .el-radio-button input')[index]
-    input.click()
+  const switchToRegex = async () => {
+    rulesBlock().querySelector<HTMLElement>('.rule-kind-select .el-select__wrapper')!.click()
+    await flushPromises()
+    const option = Array.from(document.body.querySelectorAll<HTMLElement>('.el-select-dropdown__item'))
+        .find((o) => o.textContent?.trim() === '正则表达式')
+    expect(option, '下拉框应有「正则表达式」选项').toBeTruthy()
+    option!.click()
     await flushPromises()
   }
   const typeDraft = async (text: string) => {
@@ -923,7 +969,7 @@ describe('ShareIncludeExcludeEditor 词表点选保留草稿（F3）', () => {
     config.regexPresetRules = ['^/股票/.*$']
     const wrapper = mountEditor()
     await flushPromises()
-    await selectKind(1)
+    await switchToRegex()
     await typeDraft('^/草稿/.*$')
 
     rulesBlock().querySelector<HTMLElement>('.preset-tag .el-tag')!.click()
