@@ -17,12 +17,29 @@ vi.mock('@/api/transfer', () => ({
 // 常用规则词表来自后端配置；每个用例可改 presetRules 控制词表内容
 const config = vi.hoisted(() => ({
   presetRules: [] as string[],
+  regexPresetRules: [] as string[],
   updateConfig: vi.fn().mockResolvedValue(undefined),
 }))
 
 vi.mock('@/api/config', () => ({
-  getConfig: vi.fn(async () => ({ share_sync: { exclude_preset_rules: config.presetRules } })),
+  getConfig: vi.fn(async () => ({
+    share_sync: {
+      exclude_preset_rules: config.presetRules,
+      exclude_regex_preset_rules: config.regexPresetRules,
+    },
+  })),
   updateConfig: config.updateConfig,
+}))
+
+// 后端能力与规则校验：默认支持正则且校验通过
+const rules = vi.hoisted(() => ({
+  capabilities: vi.fn(),
+  validate: vi.fn(),
+}))
+
+vi.mock('@/api/shareSync', () => ({
+  getExcludeRuleCapabilities: rules.capabilities,
+  validateExcludeRules: rules.validate,
 }))
 
 const routerPush = vi.hoisted(() => vi.fn())
@@ -126,8 +143,14 @@ beforeEach(() => {
     share_info: SHARE_INFO,
   })
   config.presetRules = []
+  config.regexPresetRules = []
   config.updateConfig.mockClear()
   routerPush.mockClear()
+  rules.capabilities.mockReset().mockResolvedValue({
+    supports_regex: true,
+    regex_limits: { max_rules: 64, max_rule_bytes: 1024, max_total_bytes: 32768, max_test_path_bytes: 4096 },
+  })
+  rules.validate.mockReset().mockResolvedValue({ valid: true, errors: [] })
 })
 
 afterEach(() => {
@@ -456,6 +479,474 @@ describe('ShareIncludeExcludeEditor 账号未登录', () => {
     expect(fieldBlock('同步内容').textContent).toContain('订阅所属账号未登录，目录树预览不可用')
     const browse = browseButton('同步内容') as HTMLButtonElement
     expect(browse.disabled, '账号未登录时浏览按钮应禁用').toBe(true)
+    wrapper.unmount()
+  })
+})
+
+describe('ShareIncludeExcludeEditor 正则规则', () => {
+  const rulesBlock = () => fieldBlock('排除规则')
+  const ruleInput = () =>
+      rulesBlock().querySelector<HTMLTextAreaElement>('.exclude-input textarea')!
+  const addButton = () =>
+      Array.from(rulesBlock().querySelectorAll<HTMLButtonElement>('.exclude-input-row button'))
+          .find((b) => b.textContent?.trim() === '添加')!
+  const kindRadios = () =>
+      Array.from(rulesBlock().querySelectorAll<HTMLElement>('.rule-kind-row .el-radio-button'))
+  const regexTags = () =>
+      Array.from(rulesBlock().querySelectorAll<HTMLElement>('.path-tags .el-tag'))
+          .filter((el) => el.textContent?.includes('正则'))
+
+  /** 切换新增规则类型（Element Plus 单选按钮的原生 input 承载变更事件） */
+  async function selectKind(index: 0 | 1) {
+    const input = kindRadios()[index].querySelector<HTMLInputElement>('input')!
+    input.click()
+    await flushPromises()
+  }
+
+  it('默认类型为通配符，能力确认后可选正则', async () => {
+    const wrapper = mountEditor()
+    await flushPromises()
+
+    const [globRadio, regexRadio] = kindRadios()
+    expect(globRadio.textContent?.trim()).toBe('通配符')
+    expect(globRadio.classList.contains('is-active')).toBe(true)
+    expect(regexRadio.querySelector('input')?.disabled, '能力可用时正则可选').toBe(false)
+    expect(ruleInput().getAttribute('placeholder')).toBe('输入规则，每行一条')
+    wrapper.unmount()
+  })
+
+  it('后端不支持时正则选项禁用，既有正则标签仍可见可删', async () => {
+    rules.capabilities.mockRejectedValue(Object.assign(new Error('request failed'), {
+      response: { status: 404 },
+    }))
+    const wrapper = mountEditor({ excludeRegexPatterns: ['^/股票/.*$'] })
+    await flushPromises()
+
+    const [, regexRadio] = kindRadios()
+    expect(regexRadio.querySelector('input')?.disabled, '404 时应禁用正则选项').toBe(true)
+    expect(rulesBlock().textContent).toContain('当前后端仅支持通配符')
+    expect(regexTags()).toHaveLength(1)
+
+    // 仍可删除已有正则（不依赖能力探测结果）
+    const close = regexTags()[0].querySelector<HTMLElement>('.el-tag__close')!
+    close.click()
+    await flushPromises()
+    expect(wrapper.emitted('update:excludeRegexPatterns')![0][0]).toEqual([])
+    wrapper.unmount()
+  })
+
+  it('切换类型后输入框提示与可访问名随之变化', async () => {
+    const wrapper = mountEditor()
+    await flushPromises()
+
+    await selectKind(1)
+
+    expect(ruleInput().getAttribute('placeholder')).toBe('输入正则，每行一条')
+    expect(ruleInput().getAttribute('aria-label')).toBe('输入正则排除规则')
+    wrapper.unmount()
+  })
+
+  it('新增正则先整批校验，通过后仅发出 regex 模型', async () => {
+    const wrapper = mountEditor()
+    await flushPromises()
+    await selectKind(1)
+
+    ruleInput().value = '^/股票/按月归档/2025.*$'
+    ruleInput().dispatchEvent(new Event('input'))
+    await flushPromises()
+    addButton().click()
+    await flushPromises()
+
+    expect(rules.validate).toHaveBeenCalledTimes(1)
+    const req = rules.validate.mock.calls[0][0] as {
+      exclude_patterns: string[]
+      exclude_regex_patterns: string[]
+    }
+    expect(req.exclude_regex_patterns).toEqual(['^/股票/按月归档/2025.*$'])
+    expect(req.exclude_patterns).toEqual([])
+
+    expect(wrapper.emitted('update:excludeRegexPatterns')![0][0])
+        .toEqual(['^/股票/按月归档/2025.*$'])
+    expect(wrapper.emitted('update:excludePatterns'), '正则不得写入通配符模型').toBeUndefined()
+    expect(ruleInput().value, '成功后清空输入').toBe('')
+    wrapper.unmount()
+  })
+
+  it('校验失败时不发出任何规则，并显示带行号的错误', async () => {
+    rules.validate.mockResolvedValue({
+      valid: false,
+      errors: [{ kind: 'regex', index: 1, message: '无法编译正则：unclosed group' }],
+    })
+    const wrapper = mountEditor()
+    await flushPromises()
+    await selectKind(1)
+
+    ruleInput().value = '^/ok$'
+    ruleInput().dispatchEvent(new Event('input'))
+    await flushPromises()
+    addButton().click()
+    await flushPromises()
+
+    expect(wrapper.emitted('update:excludeRegexPatterns')).toBeUndefined()
+    const error = rulesBlock().querySelector<HTMLElement>('.rule-error')
+    expect(error?.textContent).toContain('正则本次新增第 2 条')
+    expect(error?.textContent).toContain('无法编译正则')
+    expect(ruleInput().value, '失败时保留输入').toBe('^/ok$')
+    wrapper.unmount()
+  })
+
+  it('校验期间输入已变化则丢弃过期结果', async () => {
+    let release: (v: unknown) => void = () => {}
+    rules.validate.mockReturnValue(new Promise((resolve) => {
+      release = resolve
+    }))
+    const wrapper = mountEditor()
+    await flushPromises()
+    await selectKind(1)
+
+    ruleInput().value = '^/旧$'
+    ruleInput().dispatchEvent(new Event('input'))
+    await flushPromises()
+    addButton().click()
+    await flushPromises()
+
+    // 校验返回前用户改了输入
+    ruleInput().value = '^/新$'
+    ruleInput().dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    release({ valid: true, errors: [] })
+    await flushPromises()
+
+    expect(wrapper.emitted('update:excludeRegexPatterns'), '过期批次不得写入').toBeUndefined()
+    expect(ruleInput().value, '不得清掉更新的输入').toBe('^/新$')
+    wrapper.unmount()
+  })
+
+  it('校验端点不可用时拒绝新增正则并给出可读原因', async () => {
+    rules.validate.mockRejectedValue(Object.assign(new Error('request failed'), {
+      response: { status: 404, data: { message: 'Not Found' } },
+    }))
+    const wrapper = mountEditor()
+    await flushPromises()
+    await selectKind(1)
+
+    ruleInput().value = '^/a$'
+    ruleInput().dispatchEvent(new Event('input'))
+    await flushPromises()
+    addButton().click()
+    await flushPromises()
+
+    expect(wrapper.emitted('update:excludeRegexPatterns')).toBeUndefined()
+    expect(rulesBlock().querySelector('.rule-error')?.textContent)
+        .toContain('无法校验排除规则')
+    wrapper.unmount()
+  })
+
+  it('validateRules() 无正则时直接通过，有正则时交由后端判定', async () => {
+    const clean = mountEditor()
+    await flushPromises()
+    const cleanResult = await (clean.vm as unknown as {
+      validateRules: () => Promise<{ ok: boolean }>
+    }).validateRules()
+    expect(cleanResult.ok).toBe(true)
+    expect(rules.validate, '无正则不请求后端').not.toHaveBeenCalled()
+    clean.unmount()
+
+    rules.validate.mockResolvedValue({
+      valid: false,
+      errors: [{ kind: 'regex', index: 0, message: '不能为空' }],
+    })
+    const withRegex = mountEditor({ excludeRegexPatterns: ['  '] })
+    await flushPromises()
+    const result = await (withRegex.vm as unknown as {
+      validateRules: () => Promise<{ ok: boolean; message?: string }>
+    }).validateRules()
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain('第 1 条')
+    expect(rules.validate).toHaveBeenCalledTimes(1)
+    withRegex.unmount()
+  })
+
+  it('测试已添加规则时用两份列表试匹配并展示结果', async () => {
+    rules.validate.mockResolvedValue({ valid: true, errors: [], excluded: true })
+    const wrapper = mountEditor({
+      excludePatterns: ['*.tmp'],
+      excludeRegexPatterns: ['^/股票/按月归档/2025.*$'],
+    })
+    await flushPromises()
+
+    helpButton('测试已添加规则').click()
+    await flushPromises()
+    expect(rulesBlock().textContent).toContain('测试已添加规则（不含同步范围与精确排除目录）')
+    expect(rulesBlock().textContent).toContain('相对分享根目录')
+
+    const pathInput = rulesBlock().querySelector<HTMLInputElement>('.rule-test-input input')!
+    pathInput.value = '/股票/按月归档/2025-01/x.mp4'
+    pathInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const runBtn = rulesBlock()
+        .querySelector<HTMLButtonElement>('.rule-test-row button[aria-label="测试已添加规则"]')!
+    runBtn.click()
+    await flushPromises()
+
+    const req = rules.validate.mock.calls[0][0] as {
+      exclude_patterns: string[]
+      exclude_regex_patterns: string[]
+      test_path?: string
+    }
+    expect(req.exclude_patterns).toEqual(['*.tmp'])
+    expect(req.exclude_regex_patterns).toEqual(['^/股票/按月归档/2025.*$'])
+    expect(req.test_path).toBe('/股票/按月归档/2025-01/x.mp4')
+    expect(rulesBlock().querySelector('.rule-test-result')?.textContent).toContain('会排除该路径')
+    wrapper.unmount()
+  })
+
+  it('试匹配失败时清除旧结果并显示错误', async () => {
+    rules.validate.mockResolvedValueOnce({ valid: true, errors: [], excluded: false })
+    const wrapper = mountEditor({ excludePatterns: ['*.tmp'] })
+    await flushPromises()
+
+    helpButton('测试已添加规则').click()
+    await flushPromises()
+    const runBtn = rulesBlock()
+        .querySelector<HTMLButtonElement>('.rule-test-row button[aria-label="测试已添加规则"]')!
+    runBtn.click()
+    await flushPromises()
+    expect(rulesBlock().querySelector('.rule-test-result')?.textContent).toContain('不排除该路径')
+
+    rules.validate.mockResolvedValueOnce({
+      valid: false,
+      errors: [{ kind: 'path', message: '试匹配路径最多 4096 字节' }],
+    })
+    runBtn.click()
+    await flushPromises()
+    expect(rulesBlock().querySelector('.rule-test-result'), '失败不得保留旧结果').toBeNull()
+    expect(rulesBlock().querySelector('.rule-error')?.textContent).toContain('4096')
+    wrapper.unmount()
+  })
+
+  it('正则词表只添加到正则类型，且标记为常用 chip', async () => {
+    config.regexPresetRules = ['^/基金/.*$']
+    const wrapper = mountEditor()
+    await flushPromises()
+    await selectKind(1)
+
+    const chip = rulesBlock().querySelector<HTMLElement>('.preset-tag .el-tag')!
+    expect(chip.textContent?.trim()).toBe('^/基金/.*$')
+    chip.click()
+    await flushPromises()
+
+    expect(wrapper.emitted('update:excludeRegexPatterns')![0][0]).toEqual(['^/基金/.*$'])
+    expect(wrapper.emitted('update:excludePatterns')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('存为常用只写当前类型的词表字段', async () => {
+    config.regexPresetRules = []
+    const wrapper = mountEditor({ excludeRegexPatterns: ['^/股票/.*$'] })
+    await flushPromises()
+    await selectKind(1)
+
+    const saveBtn = Array.from(rulesBlock().querySelectorAll<HTMLButtonElement>('.preset-row button'))
+        .find((b) => b.textContent?.trim() === '存为常用')!
+    saveBtn.click()
+    await flushPromises()
+
+    expect(config.updateConfig).toHaveBeenCalledTimes(1)
+    const saved = config.updateConfig.mock.calls[0][0] as {
+      share_sync: { exclude_preset_rules: string[]; exclude_regex_preset_rules: string[] }
+    }
+    expect(saved.share_sync.exclude_regex_preset_rules).toEqual(['^/股票/.*$'])
+    expect(saved.share_sync.exclude_preset_rules, '正则不得污染 glob 词表').toEqual([])
+    wrapper.unmount()
+  })
+
+  it('既有通配符标签保持原有样式与删除行为', async () => {
+    const wrapper = mountEditor({ excludePatterns: ['*.tmp'] })
+    await flushPromises()
+
+    const tags = rulesBlock().querySelectorAll<HTMLElement>('.path-tags .el-tag')
+    expect(tags).toHaveLength(1)
+    expect(tags[0].textContent?.trim()).toBe('*.tmp')
+    expect(tags[0].textContent, '通配符标签不加正则标记').not.toContain('正则')
+    tags[0].querySelector<HTMLElement>('.el-tag__close')!.click()
+    await flushPromises()
+    expect(wrapper.emitted('update:excludePatterns')![0][0]).toEqual([])
+    wrapper.unmount()
+  })
+})
+
+describe('ShareIncludeExcludeEditor 试匹配结果快照（F1）', () => {
+  const rulesBlock = () => fieldBlock('排除规则')
+  const openTest = async () => {
+    helpButton('测试已添加规则').click()
+    await flushPromises()
+    return {
+      pathInput: rulesBlock().querySelector<HTMLInputElement>('.rule-test-input input')!,
+      run: () =>
+        rulesBlock()
+            .querySelector<HTMLButtonElement>('.rule-test-row button[aria-label="测试已添加规则"]')!,
+    }
+  }
+  const setPath = async (input: HTMLInputElement, value: string) => {
+    input.value = value
+    input.dispatchEvent(new Event('input'))
+    await flushPromises()
+  }
+
+  it('已完成结果在路径改变后立即消失，改回也不复活旧结果', async () => {
+    rules.validate.mockResolvedValue({ valid: true, errors: [], excluded: true })
+    const wrapper = mountEditor({ excludePatterns: ['*.tmp'] })
+    await flushPromises()
+    const { pathInput, run } = await openTest()
+
+    await setPath(pathInput, '/股票/按月归档/2025-01/a.txt')
+    run().click()
+    await flushPromises()
+    expect(rulesBlock().querySelector('.rule-test-result')?.textContent).toContain('会排除该路径')
+
+    await setPath(pathInput, '/股票/按月归档/2026-01/a.txt')
+    expect(rulesBlock().querySelector('.rule-test-result'), '路径变化后结果必须失效').toBeNull()
+
+    await setPath(pathInput, '/股票/按月归档/2025-01/a.txt')
+    expect(rulesBlock().querySelector('.rule-test-result'), '改回旧路径也不能恢复旧结果').toBeNull()
+    wrapper.unmount()
+  })
+
+  it('已添加规则列表变化后结果失效', async () => {
+    rules.validate.mockResolvedValue({ valid: true, errors: [], excluded: true })
+    const wrapper = mountEditor({ excludePatterns: ['*.tmp'] })
+    await flushPromises()
+    const { pathInput, run } = await openTest()
+
+    await setPath(pathInput, '/股票/a.tmp')
+    run().click()
+    await flushPromises()
+    expect(rulesBlock().querySelector('.rule-test-result')).not.toBeNull()
+
+    await wrapper.setProps({ excludePatterns: ['*.tmp', '*.nfo'] })
+    await flushPromises()
+    expect(rulesBlock().querySelector('.rule-test-result'), '规则变化后结果必须失效').toBeNull()
+    wrapper.unmount()
+  })
+
+  it('在飞请求期间路径变化时，返回的旧结果与新错误都被丢弃', async () => {
+    let release: (v: unknown) => void = () => {}
+    rules.validate.mockReturnValue(new Promise((resolve) => {
+      release = resolve
+    }))
+    const wrapper = mountEditor({ excludePatterns: ['*.tmp'] })
+    await flushPromises()
+    const { pathInput, run } = await openTest()
+
+    await setPath(pathInput, '/旧/路径')
+    run().click()
+    await flushPromises()
+    await setPath(pathInput, '/新/路径')
+
+    release({ valid: true, errors: [], excluded: true })
+    await flushPromises()
+    expect(rulesBlock().querySelector('.rule-test-result'), '过期结果不得显示').toBeNull()
+
+    // 旧请求以错误返回时同样不得挂在新输入上
+    let fail: (e: unknown) => void = () => {}
+    rules.validate.mockReturnValue(new Promise((_, reject) => {
+      fail = reject
+    }))
+    run().click()
+    await flushPromises()
+    await setPath(pathInput, '/再改/路径')
+    fail(Object.assign(new Error('boom'), { response: { data: { message: 'backend down' } } }))
+    await flushPromises()
+    expect(rulesBlock().querySelector('.rule-error'), '过期错误不得显示').toBeNull()
+    wrapper.unmount()
+  })
+
+  it('新一次测试开始时先清掉上一条结果', async () => {
+    rules.validate.mockResolvedValueOnce({ valid: true, errors: [], excluded: true })
+    const wrapper = mountEditor({ excludePatterns: ['*.tmp'] })
+    await flushPromises()
+    const { pathInput, run } = await openTest()
+
+    await setPath(pathInput, '/股票/a.tmp')
+    run().click()
+    await flushPromises()
+    expect(rulesBlock().querySelector('.rule-test-result')).not.toBeNull()
+
+    let release: (v: unknown) => void = () => {}
+    rules.validate.mockReturnValue(new Promise((resolve) => {
+      release = resolve
+    }))
+    run().click()
+    await flushPromises()
+    expect(rulesBlock().querySelector('.rule-test-result'), '新测试进行中不得保留旧结果').toBeNull()
+
+    release({ valid: true, errors: [], excluded: false })
+    await flushPromises()
+    expect(rulesBlock().querySelector('.rule-test-result')?.textContent).toContain('不排除该路径')
+    wrapper.unmount()
+  })
+})
+
+describe('ShareIncludeExcludeEditor 词表点选保留草稿（F3）', () => {
+  const rulesBlock = () => fieldBlock('排除规则')
+  const textarea = () => rulesBlock().querySelector<HTMLTextAreaElement>('.exclude-input textarea')!
+  const selectKind = async (index: 0 | 1) => {
+    const input = rulesBlock()
+        .querySelectorAll<HTMLInputElement>('.rule-kind-row .el-radio-button input')[index]
+    input.click()
+    await flushPromises()
+  }
+  const typeDraft = async (text: string) => {
+    textarea().value = text
+    textarea().dispatchEvent(new Event('input'))
+    await flushPromises()
+  }
+
+  it('点击通配符词表不清空未提交的草稿', async () => {
+    config.presetRules = ['*.nfo']
+    const wrapper = mountEditor()
+    await flushPromises()
+    await typeDraft('*尚未提交的规则*')
+
+    rulesBlock().querySelector<HTMLElement>('.preset-tag .el-tag')!.click()
+    await flushPromises()
+
+    expect(wrapper.emitted('update:excludePatterns')![0][0]).toEqual(['*.nfo'])
+    expect(textarea().value, '旁路点选必须保留草稿').toBe('*尚未提交的规则*')
+    wrapper.unmount()
+  })
+
+  it('点击正则词表同样保留草稿，且只写正则模型', async () => {
+    config.regexPresetRules = ['^/股票/.*$']
+    const wrapper = mountEditor()
+    await flushPromises()
+    await selectKind(1)
+    await typeDraft('^/草稿/.*$')
+
+    rulesBlock().querySelector<HTMLElement>('.preset-tag .el-tag')!.click()
+    await flushPromises()
+
+    expect(wrapper.emitted('update:excludeRegexPatterns')![0][0]).toEqual(['^/股票/.*$'])
+    expect(wrapper.emitted('update:excludePatterns')).toBeUndefined()
+    expect(textarea().value).toBe('^/草稿/.*$')
+    wrapper.unmount()
+  })
+
+  it('textarea 提交后仍清空自己提交的那段文本', async () => {
+    const wrapper = mountEditor()
+    await flushPromises()
+    await typeDraft('*.tmp')
+
+    rulesBlock()
+        .querySelectorAll<HTMLButtonElement>('.exclude-input-row button')[0]
+        .click()
+    await flushPromises()
+
+    expect(wrapper.emitted('update:excludePatterns')![0][0]).toEqual(['*.tmp'])
+    expect(textarea().value).toBe('')
     wrapper.unmount()
   })
 })

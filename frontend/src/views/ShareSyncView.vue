@@ -61,7 +61,10 @@
                   <span class="dot">·</span><span>范围 {{ s.include_paths.length }} 条</span>
                 </template>
                 <template v-if="s.exclude_patterns.length">
-                  <span class="dot">·</span><span>排除 {{ s.exclude_patterns.length }} 条</span>
+                  <span class="dot">·</span><span>排除通配符 {{ s.exclude_patterns.length }} 条</span>
+                </template>
+                <template v-if="(s.exclude_regex_patterns?.length ?? 0) > 0">
+                  <span class="dot">·</span><span>排除正则 {{ s.exclude_regex_patterns!.length }} 条</span>
                 </template>
                 <template v-if="s.exclude_paths?.length">
                   <span class="dot">·</span><span>排除目录 {{ s.exclude_paths.length }} 个</span>
@@ -294,7 +297,10 @@
             <span v-else>同步整个分享</span>
           </el-descriptions-item>
           <el-descriptions-item label="排除规则">
-            <div v-if="selected.exclude_patterns.length > 0" class="path-tags">
+            <div
+                v-if="selected.exclude_patterns.length > 0 || (selected.exclude_regex_patterns?.length ?? 0) > 0"
+                class="path-tags"
+            >
               <el-tag
                   v-for="(p, i) in selected.exclude_patterns"
                   :key="`ex-${i}`"
@@ -302,6 +308,14 @@
                   type="info"
               >
                 {{ p }}
+              </el-tag>
+              <el-tag
+                  v-for="(p, i) in (selected.exclude_regex_patterns ?? [])"
+                  :key="`exr-${i}`"
+                  size="small"
+                  type="warning"
+              >
+                <span class="rule-kind">正则</span>{{ p }}
               </el-tag>
             </div>
             <span v-else>无</span>
@@ -354,12 +368,14 @@
         </el-form-item>
         <el-form-item label="同步范围">
           <ShareIncludeExcludeEditor
+              ref="excludeEditorRef"
               :share-url="form.share_url"
               :password="form.password || null"
               :owner-uid="selected?.owner_uid ?? null"
               :owner-logged-in="selectedOwnerLoggedIn"
               v-model:include-paths="form.include_paths"
               v-model:exclude-patterns="form.exclude_patterns"
+              v-model:exclude-regex-patterns="form.exclude_regex_patterns"
               v-model:exclude-paths="form.exclude_paths"
           />
         </el-form-item>
@@ -857,6 +873,8 @@ const scheduledTime = ref<string>('03:00')
 
 // cron 编辑器（保存前用其预览结果拦截已知无效的表达式）
 const cronEditorRef = ref<InstanceType<typeof CronExprEditor> | null>(null)
+// 排除规则编辑器：保存前由它做后端正则校验
+const excludeEditorRef = ref<InstanceType<typeof ShareIncludeExcludeEditor> | null>(null)
 
 // 路径编辑
 function createDefaultTarget(): SyncTarget {
@@ -964,6 +982,7 @@ const defaultForm = (): {
   password: string
   include_paths: string[]
   exclude_patterns: string[]
+  exclude_regex_patterns: string[]
   exclude_paths: string[]
   targets: SyncTarget[]
   conflict_strategy: ConflictStrategy
@@ -975,6 +994,7 @@ const defaultForm = (): {
   password: '',
   include_paths: [],
   exclude_patterns: [],
+  exclude_regex_patterns: [],
   exclude_paths: [],
   targets: [createDefaultTarget()],
   conflict_strategy: 'overwrite',
@@ -1134,6 +1154,7 @@ function openEdit(s?: ShareSubscription) {
     password: selected.value.password || '',
     include_paths: [...selected.value.include_paths],
     exclude_patterns: [...selected.value.exclude_patterns],
+    exclude_regex_patterns: [...(selected.value.exclude_regex_patterns ?? [])],
     exclude_paths: [...(selected.value.exclude_paths ?? [])],
     targets: selected.value.targets.map(t => ({ ...t })) as SyncTarget[],
     conflict_strategy: selected.value.conflict_strategy,
@@ -1175,6 +1196,12 @@ async function saveForm() {
     return
   }
   syncScheduledTimeFromPicker()
+  // 存在正则规则时，必须由后端确认整份配置合法后才提交（旧后端不会被静默忽略）
+  const ruleCheck = await excludeEditorRef.value?.validateRules?.()
+  if (ruleCheck && !ruleCheck.ok) {
+    ElMessage.error(ruleCheck.message || '排除规则校验失败')
+    return
+  }
   buildSanitizedPayload()
   if (!validateForm()) {
     return
@@ -1188,6 +1215,7 @@ async function saveForm() {
         password: form.value.password || null,
         include_paths: form.value.include_paths,
         exclude_patterns: form.value.exclude_patterns,
+        exclude_regex_patterns: form.value.exclude_regex_patterns,
         exclude_paths: form.value.exclude_paths,
         targets: form.value.targets,
         conflict_strategy: form.value.conflict_strategy,
@@ -1315,6 +1343,13 @@ function buildSanitizedPayload() {
       excludeSet.add(n)
     }
   }
+  const regexSet = new Set<string>()
+  for (const p of form.value.exclude_regex_patterns) {
+    const n = p.trim()
+    if (n && !regexSet.has(n)) {
+      regexSet.add(n)
+    }
+  }
   const excludePathSet = new Set<string>()
   for (const p of form.value.exclude_paths) {
     const n = normalizePath(p)
@@ -1324,6 +1359,7 @@ function buildSanitizedPayload() {
   }
   form.value.include_paths = Array.from(includeSet)
   form.value.exclude_patterns = Array.from(excludeSet)
+  form.value.exclude_regex_patterns = Array.from(regexSet)
   form.value.exclude_paths = Array.from(excludePathSet)
 
   const nextTargets: SyncTarget[] = []
@@ -2325,7 +2361,14 @@ onUnmounted(() => {
   color: #909399;
   font-size: 12px;
 }
-.path-tags { display: flex; flex-wrap: wrap; align-items: center; }
+.path-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.rule-kind {
+  margin-right: 4px;
+  padding: 0 3px;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.06);
+  font-size: 11px;
+}
 .path-actions { display: flex; align-items: center; }
 
 .tree-picker-toolbar {
