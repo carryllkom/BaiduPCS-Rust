@@ -866,7 +866,6 @@ const scheduledTime = ref<string>('03:00')
 
 // cron 编辑器（保存前用其预览结果拦截已知无效的表达式）
 const cronEditorRef = ref<InstanceType<typeof CronExprEditor> | null>(null)
-// 排除规则编辑器：保存前由它做后端正则校验
 const excludeEditorRef = ref<InstanceType<typeof ShareIncludeExcludeEditor> | null>(null)
 
 // 路径编辑
@@ -2076,15 +2075,13 @@ onUnmounted(() => {
 
 .ss-content {
   flex: 1;
-  // 允许收缩并内部滚动：默认 min-height:auto 会让容器被内容撑高，
-  // 超出部分被外层 overflow:hidden 裁掉，末行路径再也滚不出来。
+  // 允许收缩并内部滚动，避免内容撑高后被外层 overflow:hidden 裁掉
   min-height: 0;
   overflow: auto;
   padding: 16px 20px;
 }
 
-// 移动端底部是 fixed 标签栏（56px + 安全区）：把本页限制在标签栏之上，
-// 余下高度由 .ss-content 内部滚动，换行后的最后几行路径不会被压在栏下。
+// 移动端底部为 fixed 标签栏（56px + 安全区）：限制本页高度，余下由 .ss-content 内部滚动
 .main-layout.is-mobile .share-sync-view {
   max-height: calc(100vh - 60px - 56px - env(safe-area-inset-bottom, 0px));
 }
@@ -2260,8 +2257,7 @@ onUnmounted(() => {
 .scan-current-label {
   flex: none;
 }
-// 单行路径：只在可用宽度不足时省略前面的父目录，结尾子目录始终保留。
-// direction: rtl 把省略号放到行首；bdi 隔离让路径内容仍按 LTR 阅读顺序排布。
+// rtl 让省略号出现在行首（保留结尾子目录），bdi 保持路径 LTR 顺序
 .scan-current-path {
   flex: 1 1 auto;
   min-width: 0;

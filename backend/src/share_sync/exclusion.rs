@@ -117,7 +117,6 @@ pub fn glob_to_regex(pattern: &str) -> String {
         match ch {
             '*' => out.push_str(".*"),
             '?' => out.push('.'),
-            // regex 元字符需要转义
             '.' | '+' | '(' | ')' | '|' | '^' | '$' | '{' | '}' | '[' | ']' | '\\' => {
                 out.push('\\');
                 out.push(ch);

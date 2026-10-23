@@ -195,8 +195,6 @@ pub async fn update_config(
 ) -> ApiResult<Json<ApiResponse<ConfigUpdateResponse>>> {
     info!("更新应用配置");
 
-    // 旧客户端不认识的字段（如 share_sync.exclude_regex_preset_rules）会整体丢失，
-    // 需要在反序列化前记录「字段是否存在」：缺失 = 保留服务端已有值，显式 [] = 清空。
     let mut new_config: AppConfig = serde_json::from_value(raw.clone())
         .map_err(|e| ApiError::BadRequest(format!("配置格式不合法: {}", e)))?;
 
@@ -264,9 +262,7 @@ pub async fn update_config(
         // 当前值为准，防止旧值或伪造值关闭认证（issue #177）
         new_config.web_auth = guard.web_auth.clone();
 
-        // 缺失该字段时保留已有正则词表（旧客户端 PUT 不会清掉服务端配置）。
         preserve_missing_regex_presets(&raw, &mut new_config, &guard.share_sync);
-        // 非法正则词表不得落盘，也不得进入内存配置。
         if let Err(e) = new_config.share_sync.validate() {
             return Err(ApiError::BadRequest(format!(
                 "分享同步排除规则校验失败: {}",
@@ -1036,8 +1032,7 @@ mod tests {
     }
 }
 
-/// 旧客户端 PUT 若未携带 `share_sync.exclude_regex_preset_rules`，保留服务端已有词表；
-/// 显式 `[]` 表示清空，显式列表按请求覆盖。
+/// 检查原始 JSON 以区分「字段缺失」与「显式空列表」（字段默认值为空），缺失时保留已存词表。
 fn preserve_missing_regex_presets(
     raw: &serde_json::Value,
     incoming: &mut AppConfig,

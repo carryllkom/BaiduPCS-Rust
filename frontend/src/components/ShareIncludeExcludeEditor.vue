@@ -355,7 +355,6 @@ const showExcludeHelp = ref(false)
 
 // ==================== 规则新增（后端权威校验） ====================
 
-/** 需要后端校验时的可读失败文案 */
 function validationUnavailable(e: unknown): string {
   const ax = e as AxiosError<{ message?: string; error?: string }>
   const detail = ax?.response?.data?.message || ax?.response?.data?.error || (e as Error)?.message
@@ -364,7 +363,6 @@ function validationUnavailable(e: unknown): string {
       : '无法校验排除规则：当前后端不支持正则校验'
 }
 
-/** 新增候选（按类型合并），返回两类最终列表 */
 function candidateLists(kind: RuleKind, incoming: string[]) {
   const globs = kind === 'glob'
       ? mergeRules(props.excludePatterns, incoming)
@@ -376,12 +374,8 @@ function candidateLists(kind: RuleKind, incoming: string[]) {
 }
 
 /**
- * 提交新增规则：正则（或已存在正则）必须先经后端整批校验，失败不落任何一条。
- *
- * `source` 区分来源：只有 textarea 的 Add/Enter 可以清空自己提交的那段文本；
- * 常用词表点选属于旁路操作，必须保留用户未提交的草稿。异步返回后要求来源输入
- * （仅 textarea）、类型与两份规则列表都还是发起时的快照，否则丢弃结果 ——
- * 既不覆盖更新的输入，也不会把过期批次写进订阅。
+ * 正则（或已存在正则）先经后端整批校验；异步返回时要求来源输入、类型与两份规则列表
+ * 仍是发起快照，避免过期批次覆盖新输入。词表点选是旁路操作，保留 textarea 未提交草稿。
  */
 async function commitRules(
     kind: RuleKind,
@@ -390,10 +384,8 @@ async function commitRules(
 ) {
   if (validating.value || incoming.length === 0) return
   const inputSnapshot = source === 'input' ? excludeInput.value : null
-  /** 来源是 textarea 时才关心草稿是否还是提交时那段；词表点选与草稿无关 */
   const sourceInputUnchanged = () =>
       source !== 'input' || excludeInput.value === inputSnapshot
-  /** 只有 textarea 自己的 Add/Enter 可以清空自己提交的那段文本 */
   const clearSourceInput = () => {
     if (source === 'input' && excludeInput.value === inputSnapshot) excludeInput.value = ''
   }
@@ -603,8 +595,7 @@ onMounted(async () => {
   await Promise.all([capsPromise, presetsPromise])
 })
 
-/** 点击词表 chip → 添加到当前规则类型（已存在则忽略，正则同样走校验）。
- *  这是旁路操作：不清空 textarea 里未提交的草稿。 */
+/** 点击词表 chip → 添加到当前规则类型（已存在则忽略）；旁路操作保留未提交草稿。 */
 function applyPreset(p: string) {
   if (activeRuleList.value.includes(p)) return
   void commitRules(ruleKind.value, [p], 'preset')
@@ -925,7 +916,7 @@ function confirmPicker() {
   width: 104px;
 }
 
-// 与单行规则输入框等高，桌面端下拉框/输入框/添加按钮顶边与中线对齐
+// 下拉框、输入框与添加按钮在桌面端同高对齐
 .rule-kind-select :deep(.el-select__wrapper) {
   min-height: 28px;
 }
@@ -937,7 +928,6 @@ function confirmPicker() {
   max-width: 100%;
 }
 
-// 「添加」与下拉框/输入框同高，桌面端三者顶边与中线都对齐
 .exclude-input-row > .el-button {
   min-height: 28px;
 }
