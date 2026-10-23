@@ -156,8 +156,8 @@
                     :indeterminate="true"
                     :duration="1"
                 />
-                <div class="scan-current" :title="scanOf(s.id)!.current_dir">
-                  当前：{{ scanTail(scanOf(s.id)!.current_dir) }}
+                <div class="scan-current" :title="scanOf(s.id)!.current_dir || '/'">
+                  当前：{{ scanOf(s.id)!.current_dir || '/' }}
                 </div>
                 <div v-if="scanOf(s.id)!.attempt > 1" class="scan-retry">
                   网络异常，正在第 {{ scanOf(s.id)!.attempt }} 次重试<span
@@ -790,14 +790,6 @@ function scanSummary(p: ScanProgressState): string {
   if (p.dirs_pending > 0) parts.push(`待扫描 ${p.dirs_pending}`)
   parts.push(`发现 ${p.files_seen} 个文件`)
   return parts.join(' · ')
-}
-
-/** 深目录路径只留末两级，避免把卡片撑爆；完整路径挂在 title 上。 */
-function scanTail(dir: string): string {
-  if (!dir) return '/'
-  const segs = dir.split('/').filter(Boolean)
-  if (segs.length <= 2) return '/' + segs.join('/')
-  return '…/' + segs.slice(-2).join('/')
 }
 
 // 子任务列表默认折叠（几千文件时不铺满卡片）；按订阅记忆展开态。
@@ -2083,8 +2075,20 @@ onUnmounted(() => {
 
 .ss-content {
   flex: 1;
+  // 允许收缩并内部滚动：默认 min-height:auto 会让容器被内容撑高，
+  // 超出部分被外层 overflow:hidden 裁掉，末行路径再也滚不出来。
+  min-height: 0;
   overflow: auto;
   padding: 16px 20px;
+}
+
+// 移动端底部是 fixed 标签栏（56px + 安全区）：把本页限制在标签栏之上，
+// 余下高度由 .ss-content 内部滚动，换行后的最后几行路径不会被压在栏下。
+.main-layout.is-mobile .share-sync-view {
+  max-height: calc(100vh - 60px - 56px - env(safe-area-inset-bottom, 0px));
+}
+.main-layout.is-mobile .ss-content {
+  padding-bottom: 12px;
 }
 
 // ==================== 订阅卡片列表（自动备份风格） ====================
@@ -2248,9 +2252,7 @@ onUnmounted(() => {
   margin-top: 6px;
   font-size: 12px;
   color: #909399;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
 }
 // 重试提示用告警色：让用户一眼看出是网络在抖，而不是程序卡死
 .scan-retry {

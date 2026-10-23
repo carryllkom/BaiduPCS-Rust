@@ -1,6 +1,6 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { ref } from 'vue'
-import ElementPlus from 'element-plus'
+import ElementPlus, { ElMessage } from 'element-plus'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ShareIncludeExcludeEditor from '../ShareIncludeExcludeEditor.vue'
 
@@ -14,18 +14,26 @@ vi.mock('@/api/transfer', () => ({
   previewShareDir: transfer.previewShareDir,
 }))
 
-// 常用规则词表来自后端配置；每个用例可改 presetRules 控制词表内容
+// 常用规则词表来自后端配置；mock 是有状态的：getConfig 返回当前持久化配置，
+// updateConfig 把保存结果写回同一份状态，用于验证「保存 → 重载 → 点选」链路。
+// 每个用例可改 presetRules / regexPresetRules 控制词表内容。
 const config = vi.hoisted(() => ({
   presetRules: [] as string[],
   regexPresetRules: [] as string[],
-  updateConfig: vi.fn().mockResolvedValue(undefined),
+  // 与词表无关的配置段：保存时必须原样保留
+  otherConfig: {
+    ui: { remember_netdisk_path: true, account_quick_bar: false },
+    download: { max_global_threads: 8 },
+  } as Record<string, unknown>,
+  updateConfig: vi.fn(),
 }))
 
 vi.mock('@/api/config', () => ({
   getConfig: vi.fn(async () => ({
+    ...config.otherConfig,
     share_sync: {
-      exclude_preset_rules: config.presetRules,
-      exclude_regex_preset_rules: config.regexPresetRules,
+      exclude_preset_rules: [...config.presetRules],
+      exclude_regex_preset_rules: [...config.regexPresetRules],
     },
   })),
   updateConfig: config.updateConfig,
@@ -145,6 +153,13 @@ beforeEach(() => {
   config.presetRules = []
   config.regexPresetRules = []
   config.updateConfig.mockClear()
+  // 默认实现模拟后端持久化：把保存的词表写回状态，供后续重载读取
+  config.updateConfig.mockImplementation(async (cfg: {
+    share_sync?: { exclude_preset_rules?: string[]; exclude_regex_preset_rules?: string[] }
+  }) => {
+    config.presetRules = [...(cfg?.share_sync?.exclude_preset_rules ?? [])]
+    config.regexPresetRules = [...(cfg?.share_sync?.exclude_regex_preset_rules ?? [])]
+  })
   routerPush.mockClear()
   rules.capabilities.mockReset().mockResolvedValue({
     supports_regex: true,
@@ -721,7 +736,11 @@ describe('ShareIncludeExcludeEditor 正则规则', () => {
 
     helpButton('测试已添加规则').click()
     await flushPromises()
-    expect(rulesBlock().textContent).toContain('测试已添加规则（不含同步范围与精确排除目录）')
+    expect(
+        rulesBlock().textContent,
+        '冗长的测试范围说明句已移除',
+    ).not.toContain('测试已添加规则（不含同步范围与精确排除目录）')
+    expect(rulesBlock().querySelector('.rule-test-title'), '不应保留标题节点').toBeNull()
     expect(rulesBlock().textContent).toContain('相对分享根目录')
 
     const pathInput = rulesBlock().querySelector<HTMLInputElement>('.rule-test-input input')!
@@ -993,6 +1012,240 @@ describe('ShareIncludeExcludeEditor 词表点选保留草稿（F3）', () => {
 
     expect(wrapper.emitted('update:excludePatterns')![0][0]).toEqual(['*.tmp'])
     expect(textarea().value).toBe('')
+    wrapper.unmount()
+  })
+})
+
+describe('ShareIncludeExcludeEditor 规则试匹配面板', () => {
+  const rulesBlock = () => fieldBlock('排除规则')
+  /** 「测试规则」开关（头部操作区内的那个，不是面板里的「测试」按钮） */
+  const testToggle = () =>
+      rulesBlock().querySelector<HTMLButtonElement>('.path-actions button[aria-label="测试已添加规则"]')!
+
+  it('测试规则开关带状态箭头，按钮文案不变且图标对辅助技术隐藏', async () => {
+    const wrapper = mountEditor()
+    await flushPromises()
+
+    const btn = testToggle()
+    expect(btn.tagName, '开关必须是原生按钮，键盘可激活').toBe('BUTTON')
+    expect(btn.disabled, '开关不应禁用').toBe(false)
+    expect(btn.textContent?.trim(), '按钮文案保持不变').toBe('测试规则')
+    expect(btn.getAttribute('aria-expanded'), '默认折叠').toBe('false')
+
+    const caret = btn.querySelector<HTMLElement>('.help-caret')!
+    expect(caret, '应有状态箭头').toBeTruthy()
+    expect(caret.getAttribute('aria-hidden'), '箭头应为装饰性').toBe('true')
+    expect(caret.querySelector('svg'), '应渲染箭头图标').toBeTruthy()
+    const closedCaret = caret.innerHTML
+
+    btn.click()
+    await flushPromises()
+
+    expect(testToggle().getAttribute('aria-expanded')).toBe('true')
+    expect(
+        testToggle().querySelector<HTMLElement>('.help-caret')!.innerHTML,
+        '展开后箭头应切换',
+    ).not.toBe(closedCaret)
+    expect(rulesBlock().querySelector('.rule-test'), '展开后显示试匹配面板').toBeTruthy()
+    wrapper.unmount()
+  })
+
+  it('折叠后再展开面板，展开态与面板可见性同步', async () => {
+    const wrapper = mountEditor({ excludePatterns: ['*.tmp'] })
+    await flushPromises()
+
+    testToggle().click()
+    await flushPromises()
+    expect(rulesBlock().querySelector('.rule-test')).toBeTruthy()
+
+    testToggle().click()
+    await flushPromises()
+    expect(rulesBlock().querySelector('.rule-test'), '折叠后隐藏面板').toBeNull()
+    expect(testToggle().getAttribute('aria-expanded')).toBe('false')
+
+    testToggle().click()
+    await flushPromises()
+    expect(rulesBlock().querySelector('.rule-test'), '再次展开显示面板').toBeTruthy()
+    expect(testToggle().getAttribute('aria-expanded')).toBe('true')
+    wrapper.unmount()
+  })
+})
+
+describe('ShareIncludeExcludeEditor 常用规则保存回读', () => {
+  const rulesBlock = () => fieldBlock('排除规则')
+  const saveButton = () =>
+      Array.from(rulesBlock().querySelectorAll<HTMLButtonElement>('.preset-row button'))
+          .find((b) => b.textContent?.trim() === '存为常用')!
+  const chips = () => Array.from(rulesBlock().querySelectorAll<HTMLElement>('.preset-tag .el-tag'))
+  const textarea = () => rulesBlock().querySelector<HTMLTextAreaElement>('.exclude-input textarea')!
+  const savedConfig = (index: number) =>
+      config.updateConfig.mock.calls[index][0] as {
+        share_sync: { exclude_preset_rules: string[]; exclude_regex_preset_rules: string[] }
+        ui: { remember_netdisk_path: boolean; account_quick_bar: boolean }
+        download: { max_global_threads: number }
+      }
+
+  /** 打开真实下拉框并选择新增规则类型 */
+  async function selectKind(kind: 'glob' | 'regex') {
+    rulesBlock().querySelector<HTMLElement>('.rule-kind-select .el-select__wrapper')!.click()
+    await flushPromises()
+    const label = kind === 'regex' ? '正则表达式' : '通配符'
+    const option = Array.from(
+        document.body.querySelectorAll<HTMLElement>(
+            '.el-select-dropdown__item:not(.is-disabled-hidden)',
+        ),
+    ).find((o) => o.textContent?.trim() === label)
+    expect(option, `下拉框应有「${label}」选项`).toBeTruthy()
+    option!.click()
+    await flushPromises()
+  }
+
+  it('保存通配符词表后重载可点选应用，且保留正则词表与无关配置', async () => {
+    config.regexPresetRules = ['^/基金/.*$']
+    const wrapper = mountEditor({ excludePatterns: ['*.tmp'] })
+    await flushPromises()
+
+    await saveButton().click()
+    await flushPromises()
+
+    expect(config.updateConfig).toHaveBeenCalledTimes(1)
+    const saved = savedConfig(0)
+    expect(saved.share_sync.exclude_preset_rules).toEqual(['*.tmp'])
+    expect(saved.share_sync.exclude_regex_preset_rules, '保存通配符不得改动正则词表')
+        .toEqual(['^/基金/.*$'])
+    expect(saved.ui, '无关配置必须原样保留')
+        .toEqual({ remember_netdisk_path: true, account_quick_bar: false })
+    expect(saved.download, '无关配置必须原样保留').toEqual({ max_global_threads: 8 })
+
+    wrapper.unmount()
+    document.body.innerHTML = ''
+
+    // 重载：词表从持久化配置读回
+    const reloaded = mountEditor()
+    await flushPromises()
+    expect(chips().map((c) => c.textContent?.trim()), '重载后应读到已保存的词表').toEqual(['*.tmp'])
+
+    // 未提交的草稿不因点选而丢失
+    textarea().value = '*尚未提交的草稿*'
+    textarea().dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    chips()[0].click()
+    await flushPromises()
+
+    expect(reloaded.emitted('update:excludePatterns')![0][0]).toEqual(['*.tmp'])
+    expect(textarea().value, '点选不得清空未提交的草稿').toBe('*尚未提交的草稿*')
+    reloaded.unmount()
+  })
+
+  it('保存正则词表保留通配符词表且重复保存去重，重载后按正则类型点选', async () => {
+    config.presetRules = ['*.nfo']
+    const wrapper = mountEditor({ excludeRegexPatterns: ['^/股票/.*$'] })
+    await flushPromises()
+    await selectKind('regex')
+
+    await saveButton().click()
+    await flushPromises()
+
+    const saved = savedConfig(0)
+    expect(saved.share_sync.exclude_regex_preset_rules).toEqual(['^/股票/.*$'])
+    expect(saved.share_sync.exclude_preset_rules, '保存正则不得清空通配符词表').toEqual(['*.nfo'])
+
+    wrapper.unmount()
+    document.body.innerHTML = ''
+
+    // 重载后重复保存同一条：不得产生重复词条
+    const again = mountEditor({ excludeRegexPatterns: ['^/股票/.*$'] })
+    await flushPromises()
+    await selectKind('regex')
+    await saveButton().click()
+    await flushPromises()
+    expect(savedConfig(1).share_sync.exclude_regex_preset_rules, '重复保存不得产生重复词条')
+        .toEqual(['^/股票/.*$'])
+
+    again.unmount()
+    document.body.innerHTML = ''
+
+    const reloaded = mountEditor()
+    await flushPromises()
+    await selectKind('regex')
+    expect(chips().map((c) => c.textContent?.trim())).toEqual(['^/股票/.*$'])
+
+    chips()[0].click()
+    await flushPromises()
+    expect(reloaded.emitted('update:excludeRegexPatterns')![0][0]).toEqual(['^/股票/.*$'])
+    expect(reloaded.emitted('update:excludePatterns'), '正则词表不得写入通配符模型').toBeUndefined()
+    reloaded.unmount()
+  })
+
+  it('后端拒绝保存时不提示成功、不改持久化状态，且可重试', async () => {
+    const success = vi.spyOn(ElMessage, 'success').mockImplementation(() => undefined as never)
+    const error = vi.spyOn(ElMessage, 'error').mockImplementation(() => undefined as never)
+
+    for (const reason of ['分享同步排除规则校验失败: 第 1 条正则无法编译', '服务端不支持该配置']) {
+      const wrapper = mountEditor({ excludePatterns: ['*.tmp'] })
+      await flushPromises()
+
+      config.updateConfig.mockRejectedValueOnce(new Error(reason))
+      await saveButton().click()
+      await flushPromises()
+
+      expect(success, `失败（${reason}）不得提示成功`).not.toHaveBeenCalled()
+      expect(error, `失败（${reason}）必须给出错误提示`).toHaveBeenCalled()
+      expect(error.mock.calls[0][0]).toContain('保存常用规则失败')
+      expect(config.presetRules, `失败（${reason}）不得改动持久化词表`).toEqual([])
+      expect(saveButton().disabled, '失败后按钮应恢复可用').toBe(false)
+
+      wrapper.unmount()
+      document.body.innerHTML = ''
+    }
+
+    // 恢复后可重试成功
+    const wrapper = mountEditor({ excludePatterns: ['*.tmp'] })
+    await flushPromises()
+    await saveButton().click()
+    await flushPromises()
+    expect(config.updateConfig).toHaveBeenCalledTimes(3)
+    expect(config.presetRules).toEqual(['*.tmp'])
+    expect(success, '重试成功才提示成功').toHaveBeenCalledTimes(1)
+
+    success.mockRestore()
+    error.mockRestore()
+    wrapper.unmount()
+  })
+
+  it('网络失败时不提示成功、不改持久化状态', async () => {
+    const success = vi.spyOn(ElMessage, 'success').mockImplementation(() => undefined as never)
+    const error = vi.spyOn(ElMessage, 'error').mockImplementation(() => undefined as never)
+    const wrapper = mountEditor({ excludePatterns: ['*.tmp'] })
+    await flushPromises()
+
+    config.updateConfig.mockRejectedValueOnce(new Error('Network Error'))
+    await saveButton().click()
+    await flushPromises()
+
+    expect(success, '网络失败不得提示成功').not.toHaveBeenCalled()
+    expect(error.mock.calls[0][0]).toContain('Network Error')
+    expect(config.presetRules, '网络失败不得改动持久化词表').toEqual([])
+    expect(saveButton().disabled, '失败后按钮应恢复可用').toBe(false)
+
+    success.mockRestore()
+    error.mockRestore()
+    wrapper.unmount()
+  })
+
+  it('合法但当前无样本匹配的正则仍可存为常用（不要求命中）', async () => {
+    const wrapper = mountEditor({ excludeRegexPatterns: ['^/当前没有样本的目录/.*$'] })
+    await flushPromises()
+    await selectKind('regex')
+
+    await saveButton().click()
+    await flushPromises()
+
+    expect(config.updateConfig).toHaveBeenCalledTimes(1)
+    expect(savedConfig(0).share_sync.exclude_regex_preset_rules)
+        .toEqual(['^/当前没有样本的目录/.*$'])
+    expect(rules.validate, '保存词表不做试匹配，不要求命中样本').not.toHaveBeenCalled()
     wrapper.unmount()
   })
 })

@@ -115,7 +115,12 @@
               :aria-expanded="showRuleTest"
               aria-label="测试已添加规则"
               @click="toggleRuleTest"
-          >测试规则</el-button>
+          >测试规则
+            <el-icon class="help-caret" aria-hidden="true">
+              <ArrowUp v-if="showRuleTest" />
+              <ArrowDown v-else />
+            </el-icon>
+          </el-button>
           <el-button
               size="small"
               text
@@ -176,7 +181,6 @@
       <div v-if="!regexSupported && regexReady" class="rule-kind-hint">当前后端仅支持通配符</div>
       <p v-if="ruleError" class="rule-error" role="alert">{{ ruleError }}</p>
       <div v-if="showRuleTest" class="rule-test">
-        <div class="rule-test-title">测试已添加规则（不含同步范围与精确排除目录）</div>
         <div class="rule-test-row">
           <span class="rule-test-label">相对分享根目录</span>
           <el-input
@@ -864,11 +868,6 @@ function confirmPicker() {
   padding: 8px 10px;
   border-radius: 6px;
   background: var(--el-fill-color-lighter);
-}
-
-.rule-test-title {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
 }
 
 .rule-test-row {

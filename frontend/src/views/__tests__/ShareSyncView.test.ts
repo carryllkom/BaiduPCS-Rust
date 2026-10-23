@@ -135,6 +135,10 @@ function cancelButton(): HTMLElement | null {
   return document.body.querySelector<HTMLElement>('.scan-cancel-btn')
 }
 
+function scanCurrent(): HTMLElement | null {
+  return document.body.querySelector<HTMLElement>('.scan-current')
+}
+
 /** 触发一次 WS 事件 */
 function emitWs(detail: unknown) {
   ws.handler?.({ detail })
@@ -464,6 +468,78 @@ describe('ShareSyncView 取消扫描', () => {
     await flushPromises()
 
     expect(cancelButton()).toBeNull()
+    wrapper.unmount()
+  })
+})
+
+describe('ShareSyncView 扫描当前路径展示', () => {
+  it('多级路径完整可见，不用省略号截断', async () => {
+    const full = '/剧集/第一季/高清 1080P/第 01 集'
+    const wrapper = mountView()
+    await flushPromises()
+
+    emitWs({ ...SCAN_PROGRESS, current_dir: full })
+    await flushPromises()
+
+    const el = scanCurrent()
+    expect(el, '应显示当前扫描目录').toBeTruthy()
+    expect(el!.textContent, '路径正文应完整呈现，而不是只挂在 title 上').toContain(full)
+    expect(el!.textContent).not.toContain('…')
+    wrapper.unmount()
+  })
+
+  it('路径行位于可滚动的 .ss-content 内，末行才能滚出底部标签栏', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    emitWs({ ...SCAN_PROGRESS, current_dir: '/剧集/第一季/第 01 集' })
+    await flushPromises()
+
+    const el = scanCurrent()
+    expect(el!.closest('.ss-content'), '路径行必须在可滚动容器内，末行才不会被底部标签栏盖住').toBeTruthy()
+    wrapper.unmount()
+  })
+
+  it('根路径与短路径原样展示', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    emitWs({ ...SCAN_PROGRESS, current_dir: '/' })
+    await flushPromises()
+    expect(scanCurrent()!.textContent).toContain('/')
+    expect(scanCurrent()!.textContent).not.toContain('…')
+
+    emitWs({ ...SCAN_PROGRESS, current_dir: '/剧集' })
+    await flushPromises()
+    expect(scanCurrent()!.textContent).toContain('/剧集')
+    wrapper.unmount()
+  })
+
+  it('新的扫描帧替换旧路径', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    emitWs({ ...SCAN_PROGRESS, current_dir: '/剧集/第一季' })
+    await flushPromises()
+    expect(scanCurrent()!.textContent).toContain('/剧集/第一季')
+
+    emitWs({ ...SCAN_PROGRESS, current_dir: '/剧集/第二季/第 02 集' })
+    await flushPromises()
+    expect(scanCurrent()!.textContent).toContain('/剧集/第二季/第 02 集')
+    expect(scanCurrent()!.textContent).not.toContain('/剧集/第一季')
+    wrapper.unmount()
+  })
+
+  it('超长无分隔片段完整保留', async () => {
+    const long = '/资料库/' + 'A'.repeat(120)
+    const wrapper = mountView()
+    await flushPromises()
+
+    emitWs({ ...SCAN_PROGRESS, current_dir: long })
+    await flushPromises()
+
+    expect(scanCurrent()!.textContent).toContain(long)
+    expect(scanCurrent()!.textContent).not.toContain('…')
     wrapper.unmount()
   })
 })
