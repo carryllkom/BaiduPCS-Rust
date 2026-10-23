@@ -157,7 +157,8 @@
                     :duration="1"
                 />
                 <div class="scan-current" :title="scanOf(s.id)!.current_dir || '/'">
-                  当前：{{ scanOf(s.id)!.current_dir || '/' }}
+                  <span class="scan-current-label">当前：</span>
+                  <span class="scan-current-path"><bdi>{{ scanOf(s.id)!.current_dir || '/' }}</bdi></span>
                 </div>
                 <div v-if="scanOf(s.id)!.attempt > 1" class="scan-retry">
                   网络异常，正在第 {{ scanOf(s.id)!.attempt }} 次重试<span
@@ -2252,7 +2253,27 @@ onUnmounted(() => {
   margin-top: 6px;
   font-size: 12px;
   color: #909399;
-  overflow-wrap: anywhere;
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+}
+.scan-current-label {
+  flex: none;
+}
+// 单行路径：只在可用宽度不足时省略前面的父目录，结尾子目录始终保留。
+// direction: rtl 把省略号放到行首；bdi 隔离让路径内容仍按 LTR 阅读顺序排布。
+.scan-current-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+.scan-current-path > bdi {
+  direction: ltr;
+  unicode-bidi: isolate;
 }
 // 重试提示用告警色：让用户一眼看出是网络在抖，而不是程序卡死
 .scan-retry {

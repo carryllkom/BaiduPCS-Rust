@@ -473,7 +473,15 @@ describe('ShareSyncView 取消扫描', () => {
 })
 
 describe('ShareSyncView 扫描当前路径展示', () => {
-  it('多级路径完整可见，不用省略号截断', async () => {
+  function scanCurrentPath(): HTMLElement | null {
+    return document.body.querySelector<HTMLElement>('.scan-current-path')
+  }
+
+  function scanCurrentLabel(): HTMLElement | null {
+    return document.body.querySelector<HTMLElement>('.scan-current-label')
+  }
+
+  it('完整多级路径存于单行路径节点与 title，省略只交给 CSS', async () => {
     const full = '/剧集/第一季/高清 1080P/第 01 集'
     const wrapper = mountView()
     await flushPromises()
@@ -483,8 +491,25 @@ describe('ShareSyncView 扫描当前路径展示', () => {
 
     const el = scanCurrent()
     expect(el, '应显示当前扫描目录').toBeTruthy()
+    expect(el!.getAttribute('title'), 'title 始终是完整路径').toBe(full)
     expect(el!.textContent, '路径正文应完整呈现，而不是只挂在 title 上').toContain(full)
     expect(el!.textContent).not.toContain('…')
+    expect(scanCurrentLabel()!.textContent, '「当前」标签独立且不进入省略容器').toBe('当前：')
+    expect(scanCurrentPath()!.querySelector('bdi'), '路径内容需 LTR 隔离').toBeTruthy()
+    expect(scanCurrentPath()!.textContent).toBe(full)
+    wrapper.unmount()
+  })
+
+  it('混合中文、拉丁、空格、数字与标点的顺序原样保留', async () => {
+    const full = '/我的 资源/Season 01/第1集 1080P (2026) [HEVC]'
+    const wrapper = mountView()
+    await flushPromises()
+
+    emitWs({ ...SCAN_PROGRESS, current_dir: full })
+    await flushPromises()
+
+    expect(scanCurrentPath()!.textContent, '不得改写或重排路径字符').toBe(full)
+    expect(scanCurrent()!.getAttribute('title')).toBe(full)
     wrapper.unmount()
   })
 
@@ -508,10 +533,14 @@ describe('ShareSyncView 扫描当前路径展示', () => {
     await flushPromises()
     expect(scanCurrent()!.textContent).toContain('/')
     expect(scanCurrent()!.textContent).not.toContain('…')
+    expect(scanCurrentPath()!.textContent).toBe('/')
+    expect(scanCurrent()!.getAttribute('title')).toBe('/')
 
     emitWs({ ...SCAN_PROGRESS, current_dir: '/剧集' })
     await flushPromises()
     expect(scanCurrent()!.textContent).toContain('/剧集')
+    expect(scanCurrentPath()!.textContent).toBe('/剧集')
+    expect(scanCurrent()!.getAttribute('title')).toBe('/剧集')
     wrapper.unmount()
   })
 
@@ -521,16 +550,18 @@ describe('ShareSyncView 扫描当前路径展示', () => {
 
     emitWs({ ...SCAN_PROGRESS, current_dir: '/剧集/第一季' })
     await flushPromises()
-    expect(scanCurrent()!.textContent).toContain('/剧集/第一季')
+    expect(scanCurrentPath()!.textContent).toBe('/剧集/第一季')
 
-    emitWs({ ...SCAN_PROGRESS, current_dir: '/剧集/第二季/第 02 集' })
+    const next = '/剧集/第二季/第 02 集'
+    emitWs({ ...SCAN_PROGRESS, current_dir: next })
     await flushPromises()
-    expect(scanCurrent()!.textContent).toContain('/剧集/第二季/第 02 集')
+    expect(scanCurrentPath()!.textContent).toBe(next)
+    expect(scanCurrent()!.getAttribute('title')).toBe(next)
     expect(scanCurrent()!.textContent).not.toContain('/剧集/第一季')
     wrapper.unmount()
   })
 
-  it('超长无分隔片段完整保留', async () => {
+  it('超长无分隔片段完整保留，结尾名称不被 JS 截断', async () => {
     const long = '/资料库/' + 'A'.repeat(120)
     const wrapper = mountView()
     await flushPromises()
@@ -538,7 +569,8 @@ describe('ShareSyncView 扫描当前路径展示', () => {
     emitWs({ ...SCAN_PROGRESS, current_dir: long })
     await flushPromises()
 
-    expect(scanCurrent()!.textContent).toContain(long)
+    expect(scanCurrentPath()!.textContent).toBe(long)
+    expect(scanCurrent()!.getAttribute('title')).toBe(long)
     expect(scanCurrent()!.textContent).not.toContain('…')
     wrapper.unmount()
   })
