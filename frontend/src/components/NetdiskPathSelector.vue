@@ -103,6 +103,8 @@ import { getFileList, createFolder, type FileItem } from '@/api/file'
 const props = defineProps<{
   modelValue: string  // 路径
   fsId: number        // 目录 fs_id
+  /** 浏览 / 新建目录所用的账号；缺省为当前活跃账号（跨账号转存时由父组件传入目标账号） */
+  uid?: number | null
 }>()
 
 const emit = defineEmits<{
@@ -175,7 +177,7 @@ async function loadFolders(path: string, append: boolean = false) {
 
   try {
     const page = append ? currentPage.value : 1
-    const data = await getFileList(path, page, pageSize)
+    const data = await getFileList(path, page, pageSize, 'name', false, props.uid)
     // 只显示文件夹
     const newFolders = data.list.filter(item => item.isdir === 1)
 
@@ -270,7 +272,7 @@ async function createNewFolder() {
       ? `/${name}`
       : `${currentPath.value}/${name}`
 
-    await createFolder(fullPath)
+    await createFolder(fullPath, props.uid)
     ElMessage.success('文件夹创建成功')
     newFolderName.value = ''
 
