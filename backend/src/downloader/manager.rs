@@ -5250,6 +5250,13 @@ impl DownloadManager {
         Ok(())
     }
 
+    /// 非阻塞地取任务句柄：任务表的锁被占用时返回 `None`（不等待）。
+    ///
+    /// 消息通知在发布终态事件的调用栈内用它抓住任务，任务随后被移出内存也不影响读取。
+    pub fn try_task_handle(&self, task_id: &str) -> Option<Arc<Mutex<DownloadTask>>> {
+        self.tasks.try_read().ok()?.get(task_id).cloned()
+    }
+
     /// 获取任务
     pub async fn get_task(&self, task_id: &str) -> Option<DownloadTask> {
         let tasks = self.tasks.read().await;

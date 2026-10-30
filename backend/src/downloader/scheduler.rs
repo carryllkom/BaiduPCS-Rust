@@ -1596,7 +1596,7 @@ impl ChunkScheduler {
         }
 
         // 🔥 同时取出 owner_uid 用于事件
-        let (outcome, owner_uid_raw) = {
+        let (outcome, owner_uid_raw, notify_ctx) = {
             let mut t = task_info.task.lock().await;
             let owner_uid_raw = t.owner_uid.raw();
 
@@ -1628,7 +1628,15 @@ impl ChunkScheduler {
                     total_size: t.total_size,
                 }
             };
-            (outcome, owner_uid_raw)
+            // 消息通知上下文：完成后任务马上会被移出 DownloadManager.tasks，通知的后台
+            // 任务再按 id 查必然落空（丢文件名 / 本地路径），趁还持有任务时快照一份
+            // （文件夹子任务 / 备份任务不单独通知，不必快照）
+            let notify_ctx = (!matches!(outcome, CompletionOutcome::Stale)
+                && t.group_id.is_none()
+                && !t.is_backup
+                && crate::notification::is_active())
+            .then(|| crate::notification::download_task_context(&t));
+            (outcome, owner_uid_raw, notify_ctx)
         };
 
         // Stale 分支：跳过一切终态副作用，任务保持当前状态等用户恢复或新协程接手
@@ -1660,6 +1668,10 @@ impl ChunkScheduler {
         // 发布任务事件
         if !is_backup {
             if let Some(ref ws_manager) = task_info.ws_manager {
+                // 必须在发事件之前登记：事件发布时通知模块同步取走
+                if let Some(ctx) = notify_ctx {
+                    crate::notification::remember_download_context(task_id, ctx);
+                }
                 if let Some(ref error_msg) = decrypt_error {
                     ws_manager.send_if_subscribed(
                         TaskEvent::Download(DownloadEvent::Failed {
