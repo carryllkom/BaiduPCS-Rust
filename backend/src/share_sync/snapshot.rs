@@ -375,6 +375,23 @@ impl<'a> SnapshotCollector<'a> {
         })
     }
 
+    /// 仅访问分享页（+ 验证提取码）得到的转存上下文，不列目录。
+    ///
+    /// 跨账号转存时用目标账号的客户端调用 `from_url` 再取它：`bdstoken` 是账号级的，
+    /// 不能沿用扫描账号抓到的那份。
+    pub fn captured_share(&self) -> CapturedShare {
+        CapturedShare {
+            short_key: self.short_key.clone(),
+            shareid: self.shareid.clone(),
+            uk: self.uk.clone(),
+            share_uk: self.share_uk.clone(),
+            bdstoken: self.bdstoken.clone(),
+            kind: self.kind,
+            password: self.password.clone(),
+            randsk: self.randsk.clone(),
+        }
+    }
+
     /// 注入扫描进度回调（每列完一个目录调用一次；调用方负责节流）
     pub fn with_progress(mut self, sink: ScanProgressSink) -> Self {
         self.progress = Some(sink);

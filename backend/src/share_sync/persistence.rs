@@ -879,6 +879,43 @@ impl ShareSyncPersistence {
         versioned_old_path: Option<&str>,
         reason: Option<&str>,
     ) -> Result<i64, ShareSyncError> {
+        self.add_run_item_for_account(
+            run_id,
+            path,
+            action,
+            target,
+            None,
+            transfer_task_id,
+            download_task_id,
+            status,
+            versioned_old_path,
+            reason,
+        )
+    }
+
+    /// 同 [`Self::add_run_item`]，但可标注执行账号。
+    ///
+    /// 跨账号订阅的多条执行腿共用一个 run：给非所属账号的腿把 `target` 记成
+    /// `netdisk@<uid>` / `local@<uid>`，使唯一键 `(run_id, path, target)` 按账号区分，
+    /// 避免「多账号归集」里同一文件在两个账号上的动作互相覆盖。`None` 时与老格式一致。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_run_item_for_account(
+        &self,
+        run_id: &str,
+        path: &str,
+        action: SyncAction,
+        target: TargetKind,
+        account_uid: Option<u64>,
+        transfer_task_id: Option<&str>,
+        download_task_id: Option<&str>,
+        status: RunItemStatus,
+        versioned_old_path: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<i64, ShareSyncError> {
+        let target_label = match account_uid {
+            Some(uid) => format!("{}@{}", target.as_str(), uid),
+            None => target.as_str().to_string(),
+        };
         let conn = self.conn.lock().unwrap();
         let row_id: i64 = conn.query_row(
             "INSERT INTO share_sync_run_items
@@ -894,7 +931,7 @@ impl ShareSyncPersistence {
                  reason = COALESCE(excluded.reason, share_sync_run_items.reason)
              RETURNING id",
             params![
-                run_id, path, action.as_str(), target.as_str(),
+                run_id, path, action.as_str(), target_label,
                 transfer_task_id, download_task_id,
                 status.as_str(), versioned_old_path, reason
             ],
@@ -1204,6 +1241,7 @@ mod tests {
                 remote_path: "/x".into(),
                 save_fs_id: 0,
                 conflict_strategy: None,
+                account_uid: None,
             })],
         );
         s.password = Some("1234".into());
@@ -1840,6 +1878,39 @@ mod tests {
         assert_eq!(net.status, "completed");
         assert_eq!(local.download_task_id.as_deref(), Some("dl-local"));
         assert_eq!(local.status, "transferring");
+    }
+
+    #[test]
+    fn test_add_run_item_for_account_keeps_legs_separate() {
+        // 跨账号「多账号归集」：同一文件在两个账号上都转存，各自一条 row，互不覆盖
+        let (_dir, mgr) = fresh();
+        let s = sub("a");
+        mgr.upsert_subscription(&s).unwrap();
+        mgr.start_run("run-x", &s.id, 1000).unwrap();
+        for (uid, status) in [
+            (None, RunItemStatus::Completed),
+            (Some(2), RunItemStatus::Failed),
+        ] {
+            mgr.add_run_item_for_account(
+                "run-x",
+                "/movie.mkv",
+                SyncAction::Added,
+                TargetKind::Netdisk,
+                uid,
+                None,
+                None,
+                status,
+                None,
+                None,
+            )
+            .unwrap();
+        }
+        let items = mgr.list_run_items("run-x").unwrap();
+        assert_eq!(items.len(), 2);
+        let owner = items.iter().find(|i| i.target == "netdisk").unwrap();
+        let other = items.iter().find(|i| i.target == "netdisk@2").unwrap();
+        assert_eq!(owner.status, "completed");
+        assert_eq!(other.status, "failed");
     }
 
     /// v2: mark_stale_runs_failed — 把 status='running' 且 started_at 超阈值的 run
