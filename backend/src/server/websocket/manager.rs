@@ -493,6 +493,10 @@ impl WebSocketManager {
     /// - `event`: 任务事件
     /// - `group_id`: 可选的分组 ID（用于文件夹下载等场景）
     pub fn send_if_subscribed(&self, event: TaskEvent, group_id: Option<String>) {
+        // 消息通知旁路：终态事件（转存 / 下载 / 备份完成或失败）异步推送到 Gotify / Webhook。
+        // 必须放在连接数判断之前——没有打开前端页面时也要推送；内部只做廉价判断，不阻塞。
+        crate::notification::observe_task_event(&event);
+
         if self.connection_count() == 0 {
             return;
         }

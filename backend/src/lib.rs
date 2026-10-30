@@ -55,6 +55,9 @@ pub mod share_sync;
 // 跨账号复制 / 移动（临时私密分享 + 转存 + 撤销分享）
 pub mod cross_account;
 
+// 消息通知（Gotify / 通用 Webhook）
+pub mod notification;
+
 // 导出常用类型
 pub use auth::{LoginRequest, LoginResponse, QRCode, QRCodeStatus, UserAuth};
 pub use config::AppConfig;
