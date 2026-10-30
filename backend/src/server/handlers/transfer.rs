@@ -144,9 +144,10 @@ pub async fn create_transfer(
 ) -> Json<TransferApiResponse<CreateTransferResponse>> {
     // 🔥 解析 effective_uid
     // 优先使用前端显式 `req.uid`（owner_uid alias），否则回退到当前 active_uid。
+    let active_uid = *app_state.active_uid.read().await;
     let effective_uid = match req.uid {
         Some(uid_raw) => crate::auth::Uid::new(uid_raw),
-        None => match *app_state.active_uid.read().await {
+        None => match active_uid {
             Some(uid) => uid,
             None => {
                 error!("create_transfer: 未登录且无 explicit uid");
@@ -206,6 +207,8 @@ pub async fn create_transfer(
         // 用户手动转存：非内部任务、无同步归属
         is_internal: false,
         backup_config_id: None,
+        // 「最近保存目录」是活跃账号转存对话框的默认位置：跨账号保存不记
+        remember_recent_dir: active_uid == Some(effective_uid),
     };
 
     // 创建任务
