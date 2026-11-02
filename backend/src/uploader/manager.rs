@@ -30,6 +30,10 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+/// 跳过秒传模式下 precreate 意外返回"秒传成功"时的错误信息
+const NORAPID_UNEXPECTED_RAPID_MSG: &str =
+    "跳过秒传：预创建意外返回了秒传结果，为避免文件内容异常已中止，请检查网盘中的目标文件，或关闭\"跳过秒传\"后重试";
+
 /// 上传任务信息（用于调度）
 #[derive(Debug, Clone)]
 pub struct UploadTaskInfo {
@@ -86,6 +90,10 @@ pub struct UploadManager {
     max_concurrent_tasks: Arc<AtomicUsize>,
     /// 最大重试次数（动态可调整）
     max_retries: Arc<AtomicUsize>,
+    /// 全局默认是否跳过秒传（`upload.skip_rapid_upload`，动态可调整）
+    ///
+    /// 任务自身 `skip_rapid_upload = None` 时，在开始 precreate 时读取此值。
+    skip_rapid_upload_default: Arc<AtomicBool>,
     /// 🔥 持久化管理器引用（使用单锁结构避免死锁）
     persistence_manager: Arc<Mutex<Option<Arc<Mutex<PersistenceManager>>>>>,
     /// 🔥 WebSocket 管理器
@@ -202,6 +210,7 @@ impl UploadManager {
             scheduler: scheduler.clone(),
             max_concurrent_tasks: max_concurrent_tasks_atomic,
             max_retries: max_retries_atomic,
+            skip_rapid_upload_default: Arc::new(AtomicBool::new(config.skip_rapid_upload)),
             persistence_manager: Arc::new(Mutex::new(None)),
             ws_manager: Arc::new(RwLock::new(None)),
             backup_notification_tx: Arc::new(RwLock::new(None)),
@@ -295,6 +304,79 @@ impl UploadManager {
         self.max_retries.store(new_max as usize, Ordering::SeqCst);
         self.scheduler.update_max_retries(new_max);
         info!("🔧 上传管理器: 动态调整最大重试次数为 {}", new_max);
+    }
+
+    /// 动态更新"默认跳过秒传"（对未显式指定的任务，下次开始上传时生效）
+    pub fn update_skip_rapid_upload(&self, skip: bool) {
+        let old = self.skip_rapid_upload_default.swap(skip, Ordering::SeqCst);
+        if old != skip {
+            info!("🔧 上传管理器: 默认跳过秒传 {} -> {}", old, skip);
+        }
+    }
+
+    /// 当前"默认跳过秒传"设置
+    pub fn skip_rapid_upload_default(&self) -> bool {
+        self.skip_rapid_upload_default.load(Ordering::SeqCst)
+    }
+
+    /// 准备 precreate / 合并所需的 block_list（处理"跳过秒传"）
+    ///
+    /// 返回 `(merge_block_list, precreate_block_list)`：
+    /// - 正常模式：整文件计算真实 block_list，两者相同（precreate 可能直接秒传）；
+    /// - 跳过秒传（BaiduPCS-Go `--norapid`）：不读文件，precreate 用占位 block_list，
+    ///   `merge_block_list` 为空串，表示合并时改用各分片上传时服务端返回的 MD5。
+    ///
+    /// 跳过秒传仅在以下条件同时满足时生效：任务（或全局默认）要求跳过、文件非空、
+    /// 恢复的已完成分片都带有服务端 MD5（否则回退为正常计算，保证能合并）。
+    async fn prepare_block_lists(
+        task: &Arc<Mutex<UploadTask>>,
+        skip_rapid_upload_default: &AtomicBool,
+        restored: Option<&RestoredChunkInfo>,
+        actual_local_path: &Path,
+        actual_total_size: u64,
+        vip_type: VipType,
+    ) -> Result<(String, String)> {
+        let (task_id, requested) = {
+            let t = task.lock().await;
+            (
+                t.id.clone(),
+                t.skip_rapid_upload
+                    .unwrap_or_else(|| skip_rapid_upload_default.load(Ordering::SeqCst)),
+            )
+        };
+
+        if requested {
+            let restored_ok = restored.is_none_or(|r| {
+                crate::uploader::norapid::restored_chunks_have_md5(
+                    &r.completed_chunks,
+                    &r.chunk_md5s,
+                )
+            });
+            if actual_total_size == 0 {
+                debug!("任务 {} 为空文件，忽略跳过秒传", task_id);
+            } else if !restored_ok {
+                warn!(
+                    "任务 {} 要求跳过秒传，但恢复的分片缺少服务端 MD5，回退为计算 block_list",
+                    task_id
+                );
+            } else {
+                let chunk_count =
+                    UploadChunkManager::expected_chunk_count(actual_total_size, vip_type);
+                info!(
+                    "任务 {} 跳过秒传：不计算本地 MD5，直接分片上传（{} 个分片）",
+                    task_id, chunk_count
+                );
+                return Ok((
+                    String::new(),
+                    crate::uploader::norapid::placeholder_block_list(chunk_count),
+                ));
+            }
+        }
+
+        let block_list =
+            crate::uploader::RapidUploadChecker::calculate_block_list(actual_local_path, vip_type)
+                .await?;
+        Ok((block_list.clone(), block_list))
     }
 
     /// 🔥 设置 WebSocket 管理器
@@ -1164,6 +1246,7 @@ impl UploadManager {
             is_folder_upload,
             conflict_strategy,
             None,
+            None,
         )
         .await
     }
@@ -1173,6 +1256,9 @@ impl UploadManager {
     /// handler 接收到 `req.uid` 显式归属时调用此方法，task / `.meta` / Created event
     /// 在创建瞬间用同一 effective_uid，避免事后 `override_task_owner_uid` 带来的瞬时
     /// owner_uid 错乱。
+    ///
+    /// `skip_rapid_upload`：本次上传是否跳过秒传（`None` = 跟随全局设置）。
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_task_with_owner(
         &self,
         local_path: PathBuf,
@@ -1180,6 +1266,7 @@ impl UploadManager {
         encrypt: bool,
         is_folder_upload: bool,
         conflict_strategy: Option<crate::uploader::UploadConflictStrategy>,
+        skip_rapid_upload: Option<bool>,
         owner_uid_override: crate::auth::Uid,
     ) -> Result<String> {
         self.create_task_internal(
@@ -1188,6 +1275,7 @@ impl UploadManager {
             encrypt,
             is_folder_upload,
             conflict_strategy,
+            skip_rapid_upload,
             Some(owner_uid_override),
         )
         .await
@@ -1202,6 +1290,7 @@ impl UploadManager {
         encrypt: bool,
         is_folder_upload: bool,
         conflict_strategy: Option<crate::uploader::UploadConflictStrategy>,
+        skip_rapid_upload: Option<bool>,
         owner_uid_override: Option<crate::auth::Uid>,
     ) -> Result<String> {
         // 在 task 构造前确定 effective_uid，让 task / 持久化 / Created event 一致
@@ -1230,6 +1319,8 @@ impl UploadManager {
 
         // 设置冲突策略
         task.conflict_strategy = strategy;
+        // 本次上传的秒传策略（None = 开始上传时跟随全局设置）
+        task.skip_rapid_upload = skip_rapid_upload;
 
         // 🔥 设置加密标志
         task.encrypt_enabled = encrypt;
@@ -1530,7 +1621,7 @@ impl UploadManager {
         conflict_strategy: Option<crate::uploader::UploadConflictStrategy>,
     ) -> Result<Vec<String>> {
         // 普通批量上传，不是文件夹上传
-        self.create_batch_tasks_internal(files, encrypt, false, conflict_strategy, None)
+        self.create_batch_tasks_internal(files, encrypt, false, conflict_strategy, None, None)
             .await
     }
 
@@ -1543,6 +1634,7 @@ impl UploadManager {
         files: Vec<(PathBuf, String)>,
         encrypt: bool,
         conflict_strategy: Option<crate::uploader::UploadConflictStrategy>,
+        skip_rapid_upload: Option<bool>,
         owner_uid_override: crate::auth::Uid,
     ) -> Result<Vec<String>> {
         self.create_batch_tasks_internal(
@@ -1550,6 +1642,7 @@ impl UploadManager {
             encrypt,
             false,
             conflict_strategy,
+            skip_rapid_upload,
             Some(owner_uid_override),
         )
         .await
@@ -1562,6 +1655,7 @@ impl UploadManager {
     /// * `encrypt` - 是否启用加密
     /// * `is_folder_upload` - 是否是文件夹上传的一部分
     /// * `conflict_strategy` - 冲突策略（可选）
+    /// * `skip_rapid_upload` - 是否跳过秒传（None = 跟随全局设置）
     /// * `owner_uid_override` - 显式 owner_uid 覆盖
     async fn create_batch_tasks_internal(
         &self,
@@ -1569,6 +1663,7 @@ impl UploadManager {
         encrypt: bool,
         is_folder_upload: bool,
         conflict_strategy: Option<crate::uploader::UploadConflictStrategy>,
+        skip_rapid_upload: Option<bool>,
         owner_uid_override: Option<crate::auth::Uid>,
     ) -> Result<Vec<String>> {
         let mut task_ids = Vec::with_capacity(files.len());
@@ -1581,6 +1676,7 @@ impl UploadManager {
                     encrypt,
                     is_folder_upload,
                     conflict_strategy,
+                    skip_rapid_upload,
                     owner_uid_override,
                 )
                 .await
@@ -1663,7 +1759,7 @@ impl UploadManager {
 
         // 批量创建任务（文件夹上传，需要加密目录结构）
         let task_ids = self
-            .create_batch_tasks_internal(tasks, encrypt, true, None, None)
+            .create_batch_tasks_internal(tasks, encrypt, true, None, None, None)
             .await?;
 
         info!("文件夹上传任务创建完成: 成功 {} 个", task_ids.len());
@@ -1899,6 +1995,8 @@ impl UploadManager {
         let backup_notification_tx = self.backup_notification_tx.read().await.clone();
         // 🔥 克隆活跃计数器，用于后台失败时回滚 active_count
         let active_count = self.active_count.clone();
+        // 默认跳过秒传设置（热更新共享）
+        let skip_rapid_upload_default = self.skip_rapid_upload_default.clone();
         // 同时取出 owner_uid
         let (is_backup, encrypt_enabled, original_size, owner_uid_raw) = {
             let t = task.lock().await;
@@ -2037,13 +2135,18 @@ impl UploadManager {
 
             // 1. 计算 block_list（必须重新计算，因为它是按 4MB 固定大小计算的）
             // 🔥 使用 actual_local_path（如果启用加密，则为加密后的文件路径）
-            let block_list = match crate::uploader::RapidUploadChecker::calculate_block_list(
+            // 跳过秒传时不计算，precreate 用占位列表，合并时用服务端分片 MD5
+            let (block_list, precreate_block_list) = match Self::prepare_block_lists(
+                &task,
+                &skip_rapid_upload_default,
+                restored_completed_chunks.as_ref(),
                 &actual_local_path,
+                actual_total_size,
                 vip_type,
             )
             .await
             {
-                Ok(bl) => bl,
+                Ok(lists) => lists,
                 Err(e) => {
                     let error_msg = format!("计算 block_list 失败: {}", e);
                     error!("{}", error_msg);
@@ -2079,7 +2182,12 @@ impl UploadManager {
                     crate::uploader::conflict::conflict_strategy_to_rtype(t.conflict_strategy)
                 };
                 let precreate_response = match client_snapshot
-                    .precreate(&remote_path, actual_total_size, &block_list, rtype)
+                    .precreate(
+                        &remote_path,
+                        actual_total_size,
+                        &precreate_block_list,
+                        rtype,
+                    )
                     .await
                 {
                     Ok(resp) => resp,
@@ -2100,6 +2208,24 @@ impl UploadManager {
                         return;
                     }
                 };
+
+                // 跳过秒传模式下 precreate 不应返回秒传结果（占位 MD5 不可能命中），出现即中止
+                if block_list.is_empty() && precreate_response.is_rapid_upload() {
+                    let error_msg = NORAPID_UNEXPECTED_RAPID_MSG.to_string();
+                    error!("{}: {}", error_msg, remote_path);
+                    Self::handle_upload_failure(
+                        &task_id_string,
+                        &task,
+                        error_msg,
+                        &task_slot_pool,
+                        ws_manager.as_ref(),
+                        persistence_manager.as_ref(),
+                        backup_notification_tx.as_ref(),
+                        &active_count,
+                    )
+                    .await;
+                    return;
+                }
 
                 // 检查秒传
                 if precreate_response.is_rapid_upload() {
@@ -3255,6 +3381,7 @@ impl UploadManager {
             encryption_key_version: metadata.encryption_key_version.unwrap_or(1),
             // 冲突策略（历史任务使用默认值）
             conflict_strategy: crate::uploader::UploadConflictStrategy::default(),
+            skip_rapid_upload: None,
         })
     }
 
@@ -3861,6 +3988,7 @@ impl UploadManager {
             is_folder_upload,
             conflict_strategy,
             None,
+            None,
         )
         .await
     }
@@ -3876,6 +4004,7 @@ impl UploadManager {
         encrypt: bool,
         is_folder_upload: bool,
         conflict_strategy: Option<crate::uploader::UploadConflictStrategy>,
+        skip_rapid_upload: Option<bool>,
         owner_uid: crate::auth::Uid,
     ) -> Result<(Vec<String>, Vec<String>)> {
         self.create_batch_tasks_dedup_internal(
@@ -3883,6 +4012,7 @@ impl UploadManager {
             encrypt,
             is_folder_upload,
             conflict_strategy,
+            skip_rapid_upload,
             Some(owner_uid),
         )
         .await
@@ -3894,6 +4024,7 @@ impl UploadManager {
         encrypt: bool,
         is_folder_upload: bool,
         conflict_strategy: Option<crate::uploader::UploadConflictStrategy>,
+        skip_rapid_upload: Option<bool>,
         owner_uid_override: Option<crate::auth::Uid>,
     ) -> Result<(Vec<String>, Vec<String>)> {
         let mut new_ids = Vec::new();
@@ -3907,29 +4038,17 @@ impl UploadManager {
                 continue;
             }
 
-            let task_result = match owner_uid_override {
-                Some(uid) => {
-                    self.create_task_with_owner(
-                        canonical.clone(),
-                        original_remote_path.clone(),
-                        encrypt,
-                        is_folder_upload,
-                        conflict_strategy,
-                        uid,
-                    )
-                    .await
-                }
-                None => {
-                    self.create_task(
-                        canonical.clone(),
-                        original_remote_path.clone(),
-                        encrypt,
-                        is_folder_upload,
-                        conflict_strategy,
-                    )
-                    .await
-                }
-            };
+            let task_result = self
+                .create_task_internal(
+                    canonical.clone(),
+                    original_remote_path.clone(),
+                    encrypt,
+                    is_folder_upload,
+                    conflict_strategy,
+                    skip_rapid_upload,
+                    owner_uid_override,
+                )
+                .await;
 
             match task_result {
                 Ok(task_id) => {
@@ -4691,6 +4810,8 @@ impl UploadManager {
         let snapshot_manager = self.snapshot_manager.clone();
         // 🔥 克隆加密配置存储（用于后台监控启动加密任务）
         let encryption_config_store = self.encryption_config_store.clone();
+        // 默认跳过秒传设置（热更新共享）
+        let skip_rapid_upload_default = self.skip_rapid_upload_default.clone();
         // 不再 capture self.owner_uid。
         // 共享 manager 设计下 self.owner_uid 不可靠（同一个 Arc 服务多个账号）。
         // 事件归属一律读 `task.owner_uid`（已在 task_basic_info 元组里取出 task_owner_uid_raw）。
@@ -4926,6 +5047,7 @@ impl UploadManager {
                             let snapshot_manager_clone = snapshot_manager.read().await.clone();
                             // 🔥 克隆加密配置存储（用于执行加密流程）
                             let encryption_config_store_clone = encryption_config_store.clone();
+                            let skip_rapid_upload_default = skip_rapid_upload_default.clone();
 
                             // 在后台执行 precreate 并注册到调度器
                             tokio::spawn(async move {
@@ -5033,14 +5155,19 @@ impl UploadManager {
                                 };
 
                                 // 1. 计算 block_list（使用实际文件路径，可能是加密后的文件）
-                                let block_list =
-                                    match crate::uploader::RapidUploadChecker::calculate_block_list(
+                                // 跳过秒传时不计算，precreate 用占位列表，合并时用服务端分片 MD5
+                                let (block_list, precreate_block_list) =
+                                    match Self::prepare_block_lists(
+                                        &task,
+                                        &skip_rapid_upload_default,
+                                        restored_completed_chunks.as_ref(),
                                         &actual_local_path,
+                                        actual_total_size,
                                         vip_type,
                                     )
                                     .await
                                     {
-                                        Ok(bl) => bl,
+                                        Ok(lists) => lists,
                                         Err(e) => {
                                             let error_msg = format!("计算 block_list 失败: {}", e);
                                             error!("后台监控：{}", error_msg);
@@ -5069,7 +5196,12 @@ impl UploadManager {
                                     )
                                 };
                                 let precreate_response = match client_snapshot
-                                    .precreate(&remote_path, actual_total_size, &block_list, rtype)
+                                    .precreate(
+                                        &remote_path,
+                                        actual_total_size,
+                                        &precreate_block_list,
+                                        rtype,
+                                    )
                                     .await
                                 {
                                     Ok(resp) => resp,
@@ -5090,6 +5222,24 @@ impl UploadManager {
                                         return;
                                     }
                                 };
+
+                                // 跳过秒传模式下 precreate 不应返回秒传结果，出现即中止
+                                if block_list.is_empty() && precreate_response.is_rapid_upload() {
+                                    let error_msg = NORAPID_UNEXPECTED_RAPID_MSG.to_string();
+                                    error!("后台监控：{}: {}", error_msg, remote_path);
+                                    Self::handle_upload_failure(
+                                        &task_id_clone,
+                                        &task,
+                                        error_msg,
+                                        &task_slot_pool_clone,
+                                        ws_manager_clone.as_ref(),
+                                        pm_clone.as_ref(),
+                                        backup_notification_tx_clone.as_ref(),
+                                        &active_count_clone,
+                                    )
+                                    .await;
+                                    return;
+                                }
 
                                 // 检查秒传
                                 if precreate_response.is_rapid_upload() {
@@ -5910,5 +6060,144 @@ mod tests {
         // 初始状态：所有槽位都可用
         assert!(max_slots > 0, "最大槽位数应该大于0");
         assert_eq!(available_slots, max_slots, "初始状态所有槽位都应该可用");
+    }
+}
+
+#[cfg(test)]
+mod skip_rapid_upload_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn temp_file(size: usize) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(&vec![7u8; size]).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    fn task_with(flag: Option<bool>, path: &Path, size: u64) -> Arc<Mutex<UploadTask>> {
+        let mut t = UploadTask::new(path.to_path_buf(), "/r/x".to_string(), size);
+        t.skip_rapid_upload = flag;
+        Arc::new(Mutex::new(t))
+    }
+
+    #[tokio::test]
+    async fn prepare_block_lists_follows_task_then_global() {
+        let size = 5 * 1024 * 1024 + 3; // > 4MB → 多分片
+        let f = temp_file(size);
+        let size = size as u64;
+        let expected_chunks = UploadChunkManager::expected_chunk_count(size, VipType::Normal);
+
+        // 任务显式跳过 → 不计算 MD5，占位条数 = 分片数
+        let global_off = AtomicBool::new(false);
+        let (merge, pre) = UploadManager::prepare_block_lists(
+            &task_with(Some(true), f.path(), size),
+            &global_off,
+            None,
+            f.path(),
+            size,
+            VipType::Normal,
+        )
+        .await
+        .unwrap();
+        assert!(merge.is_empty());
+        let pre: Vec<String> = serde_json::from_str(&pre).unwrap();
+        assert_eq!(pre.len(), expected_chunks);
+        assert_eq!(pre[0], crate::uploader::norapid::NORAPID_PLACEHOLDER_MD5[0]);
+
+        // 任务未指定 + 全局关闭 → 正常计算真实 block_list
+        let (merge, pre) = UploadManager::prepare_block_lists(
+            &task_with(None, f.path(), size),
+            &global_off,
+            None,
+            f.path(),
+            size,
+            VipType::Normal,
+        )
+        .await
+        .unwrap();
+        assert!(!merge.is_empty());
+        assert_eq!(merge, pre);
+
+        // 任务未指定 + 全局开启 → 跳过
+        let global_on = AtomicBool::new(true);
+        let (merge, _) = UploadManager::prepare_block_lists(
+            &task_with(None, f.path(), size),
+            &global_on,
+            None,
+            f.path(),
+            size,
+            VipType::Normal,
+        )
+        .await
+        .unwrap();
+        assert!(merge.is_empty());
+
+        // 任务显式不跳过 → 覆盖全局开启
+        let (merge, _) = UploadManager::prepare_block_lists(
+            &task_with(Some(false), f.path(), size),
+            &global_on,
+            None,
+            f.path(),
+            size,
+            VipType::Normal,
+        )
+        .await
+        .unwrap();
+        assert!(!merge.is_empty());
+    }
+
+    #[tokio::test]
+    async fn prepare_block_lists_falls_back_when_unsafe() {
+        // 空文件：忽略跳过秒传
+        let empty = temp_file(0);
+        let (merge, _) = UploadManager::prepare_block_lists(
+            &task_with(Some(true), empty.path(), 0),
+            &AtomicBool::new(false),
+            None,
+            empty.path(),
+            0,
+            VipType::Normal,
+        )
+        .await
+        .unwrap();
+        assert!(!merge.is_empty());
+
+        // 恢复的已完成分片缺少服务端 MD5：回退为计算，保证能合并
+        let f = temp_file(1024);
+        let restored = RestoredChunkInfo {
+            chunk_size: 1024,
+            completed_chunks: vec![0],
+            chunk_md5s: vec![None],
+        };
+        let (merge, _) = UploadManager::prepare_block_lists(
+            &task_with(Some(true), f.path(), 1024),
+            &AtomicBool::new(false),
+            Some(&restored),
+            f.path(),
+            1024,
+            VipType::Normal,
+        )
+        .await
+        .unwrap();
+        assert!(!merge.is_empty());
+
+        // 恢复的分片都带 MD5：仍然跳过
+        let restored_ok = RestoredChunkInfo {
+            chunk_size: 1024,
+            completed_chunks: vec![0],
+            chunk_md5s: vec![Some("abc".to_string())],
+        };
+        let (merge, _) = UploadManager::prepare_block_lists(
+            &task_with(Some(true), f.path(), 1024),
+            &AtomicBool::new(false),
+            Some(&restored_ok),
+            f.path(),
+            1024,
+            VipType::Normal,
+        )
+        .await
+        .unwrap();
+        assert!(merge.is_empty());
     }
 }

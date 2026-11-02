@@ -27,6 +27,11 @@ pub struct CreateUploadRequest {
     /// 冲突策略（可选，未指定则使用默认值）
     #[serde(default)]
     pub conflict_strategy: Option<UploadConflictStrategy>,
+    /// 是否跳过秒传（可选，对应 BaiduPCS-Go `upload --norapid`）
+    ///
+    /// 未指定（null/缺省）= 跟随全局设置 `upload.skip_rapid_upload`。
+    #[serde(default)]
+    pub skip_rapid_upload: Option<bool>,
     /// 显式指定 owner_uid
     ///
     /// **字段名兼容**：
@@ -51,6 +56,11 @@ pub struct CreateFolderUploadRequest {
     /// 冲突策略（可选，未指定则使用默认值）
     #[serde(default)]
     pub conflict_strategy: Option<UploadConflictStrategy>,
+    /// 是否跳过秒传（可选，对应 BaiduPCS-Go `upload --norapid`）
+    ///
+    /// 未指定（null/缺省）= 跟随全局设置 `upload.skip_rapid_upload`。
+    #[serde(default)]
+    pub skip_rapid_upload: Option<bool>,
     /// 显式指定 owner_uid
     ///
     /// **字段名兼容**：
@@ -135,6 +145,11 @@ pub struct CreateBatchUploadRequest {
     /// 冲突策略（可选，未指定则使用默认值）
     #[serde(default)]
     pub conflict_strategy: Option<UploadConflictStrategy>,
+    /// 是否跳过秒传（可选，对应 BaiduPCS-Go `upload --norapid`）
+    ///
+    /// 未指定（null/缺省）= 跟随全局设置 `upload.skip_rapid_upload`。
+    #[serde(default)]
+    pub skip_rapid_upload: Option<bool>,
     /// 显式指定 owner_uid
     ///
     /// **字段名兼容**：
@@ -206,6 +221,7 @@ pub async fn create_upload(
             req.encrypt,
             false,
             conflict_strategy,
+            req.skip_rapid_upload,
             effective_uid,
         )
         .await
@@ -327,6 +343,7 @@ pub async fn create_folder_upload(
             scan_options,
             req.encrypt,
             conflict_strategy,
+            req.skip_rapid_upload,
             effective_uid,
         )
         .await
@@ -388,7 +405,13 @@ pub async fn create_batch_upload(
     // 用 create_batch_tasks_with_owner 在创建瞬间
     // 写入 effective_uid，避免事后纠错路径下 Created event 短暂带启动账号。
     match upload_manager
-        .create_batch_tasks_with_owner(files, req.encrypt, conflict_strategy, effective_uid)
+        .create_batch_tasks_with_owner(
+            files,
+            req.encrypt,
+            conflict_strategy,
+            req.skip_rapid_upload,
+            effective_uid,
+        )
         .await
     {
         Ok(task_ids) => {
@@ -801,4 +824,32 @@ pub async fn batch_delete_uploads(
     Ok(Json(ApiResponse::success(
         BatchOperationResponse::from_results(results),
     )))
+}
+
+#[cfg(test)]
+mod skip_rapid_upload_request_tests {
+    use super::*;
+
+    #[test]
+    fn requests_accept_optional_skip_rapid_upload() {
+        // 旧请求不带字段 → None（跟随全局设置）
+        let r: CreateUploadRequest =
+            serde_json::from_str(r#"{"local_path":"/a","remote_path":"/b"}"#).unwrap();
+        assert_eq!(r.skip_rapid_upload, None);
+        let r: CreateUploadRequest = serde_json::from_str(
+            r#"{"local_path":"/a","remote_path":"/b","skip_rapid_upload":true}"#,
+        )
+        .unwrap();
+        assert_eq!(r.skip_rapid_upload, Some(true));
+
+        let r: CreateFolderUploadRequest = serde_json::from_str(
+            r#"{"local_folder":"/a","remote_folder":"/b","skip_rapid_upload":false}"#,
+        )
+        .unwrap();
+        assert_eq!(r.skip_rapid_upload, Some(false));
+
+        let r: CreateBatchUploadRequest =
+            serde_json::from_str(r#"{"files":[["/a","/b"]],"skip_rapid_upload":null}"#).unwrap();
+        assert_eq!(r.skip_rapid_upload, None);
+    }
 }

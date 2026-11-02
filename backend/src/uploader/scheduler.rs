@@ -164,6 +164,9 @@ pub struct UploadTaskScheduleInfo {
     /// 文件总大小
     pub total_size: u64,
     /// block_list（4MB 分片 MD5 列表，用于 create_file）
+    ///
+    /// 空串表示"跳过秒传"模式：未在本地计算 MD5，合并时改用各分片上传时服务端返回的 MD5
+    /// （见 [`UploadTaskScheduleInfo::merge_block_list`]）。
     pub block_list: String,
 
     // 控制
@@ -219,6 +222,24 @@ pub struct UploadTaskScheduleInfo {
     // 🔥 Manager 任务列表引用（用于任务完成时立即清理，避免内存泄漏）
     /// UploadManager.tasks 的引用，任务完成后从中移除
     pub manager_tasks: Option<Arc<dashmap::DashMap<String, crate::uploader::UploadTaskInfo>>>,
+}
+
+impl UploadTaskScheduleInfo {
+    /// 合并（create_file）时使用的 block_list
+    ///
+    /// - 正常模式：precreate 前在本地计算好的 `block_list`；
+    /// - 跳过秒传模式（`block_list` 为空串）：按分片顺序取服务端返回的 MD5，缺任何一片即报错。
+    pub async fn merge_block_list(&self) -> Result<String> {
+        if !self.block_list.is_empty() {
+            return Ok(self.block_list.clone());
+        }
+        let block_list = self.chunk_manager.lock().await.server_md5_block_list()?;
+        info!(
+            "上传任务 {} 跳过秒传：使用服务端返回的分片 MD5 合并",
+            self.task_id
+        );
+        Ok(block_list)
+    }
 }
 
 // =====================================================
@@ -709,16 +730,21 @@ impl UploadChunkScheduler {
                                             task.conflict_strategy,
                                         )
                                     };
-                                    let create_result = client_snapshot
-                                        .create_file(
-                                            &task_info.remote_path,
-                                            &task_info.block_list,
-                                            &task_info.upload_id,
-                                            task_info.total_size,
-                                            "0",
-                                            rtype,
-                                        )
-                                        .await;
+                                    let create_result = match task_info.merge_block_list().await {
+                                        Ok(block_list) => {
+                                            client_snapshot
+                                                .create_file(
+                                                    &task_info.remote_path,
+                                                    &block_list,
+                                                    &task_info.upload_id,
+                                                    task_info.total_size,
+                                                    "0",
+                                                    rtype,
+                                                )
+                                                .await
+                                        }
+                                        Err(e) => Err(e),
+                                    };
 
                                     active_tasks.write().await.remove(task_id);
 
@@ -1169,16 +1195,21 @@ impl UploadChunkScheduler {
                                 task.conflict_strategy,
                             )
                         };
-                        let create_result = client_snapshot
-                            .create_file(
-                                &task_info.remote_path,
-                                &task_info.block_list,
-                                &task_info.upload_id,
-                                task_info.total_size,
-                                "0",
-                                rtype,
-                            )
-                            .await;
+                        let create_result = match task_info.merge_block_list().await {
+                            Ok(block_list) => {
+                                client_snapshot
+                                    .create_file(
+                                        &task_info.remote_path,
+                                        &block_list,
+                                        &task_info.upload_id,
+                                        task_info.total_size,
+                                        "0",
+                                        rtype,
+                                    )
+                                    .await
+                            }
+                            Err(e) => Err(e),
+                        };
 
                         // 从调度器移除
                         active_tasks.write().await.remove(&task_id);

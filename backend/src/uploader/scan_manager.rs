@@ -187,6 +187,7 @@ impl ScanManager {
             scan_options,
             encrypt,
             conflict_strategy,
+            None,
             owner,
         )
         .await
@@ -197,6 +198,9 @@ impl ScanManager {
     /// 共享 `ScanManager` 是 startup-bound 单例，`self.owner_uid` 不可靠。
     /// `/uploads/folder` handler 应解析 `effective_uid = req.uid.or(active)` 后
     /// 调用此入口，使扫描事件、上传子任务、checkpoint 都绑定到正确账号。
+    ///
+    /// `skip_rapid_upload`：本次文件夹上传的子任务是否跳过秒传（`None` = 跟随全局设置）。
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_scan_with_owner(
         &self,
         local_folder: PathBuf,
@@ -204,6 +208,7 @@ impl ScanManager {
         scan_options: Option<ScanOptions>,
         encrypt: bool,
         conflict_strategy: Option<crate::uploader::UploadConflictStrategy>,
+        skip_rapid_upload: Option<bool>,
         owner_uid: crate::auth::Uid,
     ) -> Result<String> {
         self.start_scan_internal(
@@ -212,11 +217,13 @@ impl ScanManager {
             scan_options,
             encrypt,
             conflict_strategy,
+            skip_rapid_upload,
             Some(owner_uid),
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start_scan_internal(
         &self,
         local_folder: PathBuf,
@@ -224,6 +231,7 @@ impl ScanManager {
         scan_options: Option<ScanOptions>,
         encrypt: bool,
         conflict_strategy: Option<crate::uploader::UploadConflictStrategy>,
+        skip_rapid_upload: Option<bool>,
         owner_uid: Option<crate::auth::Uid>,
     ) -> Result<String> {
         // 验证路径
@@ -316,6 +324,7 @@ impl ScanManager {
                 remote_folder,
                 encrypt,
                 conflict_strategy, // Pass conflict_strategy to scan_loop
+                skip_rapid_upload,
                 cancel_token,
                 active_scans,
                 upload_manager,
@@ -377,6 +386,7 @@ impl ScanManager {
         remote_folder: String,
         encrypt: bool,
         conflict_strategy: Option<crate::uploader::UploadConflictStrategy>,
+        skip_rapid_upload: Option<bool>,
         cancel_token: CancellationToken,
         active_scans: Arc<DashMap<String, ScanTaskInfo>>,
         upload_manager: Arc<UploadManager>,
@@ -427,6 +437,7 @@ impl ScanManager {
                             encrypt,
                             true,
                             conflict_strategy,
+                            skip_rapid_upload,
                             uid,
                         )
                         .await
@@ -624,6 +635,7 @@ impl ScanManager {
                                 Some(cp.scan_options),
                                 cp.encrypt,
                                 None, // conflict_strategy - use default for resumed scans
+                                None, // skip_rapid_upload - 恢复的扫描跟随全局设置
                                 uid,
                             )
                             .await

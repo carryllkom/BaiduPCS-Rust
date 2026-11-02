@@ -15,6 +15,7 @@ pub mod engine;
 pub mod folder;
 pub mod health;
 pub mod manager;
+pub mod norapid;
 pub mod rapid_upload;
 pub mod scan_manager;
 pub mod scheduler;
