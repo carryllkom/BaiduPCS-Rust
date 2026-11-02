@@ -3911,6 +3911,79 @@ impl NetdiskClient {
         Ok(cancel_response)
     }
 
+    /// 构造 `share/mexpire` 请求（不发送；`now` 为当前 Unix 秒，便于测试）
+    fn build_share_mexpire_request(
+        &self,
+        share_id: u64,
+        days: i32,
+        now: i64,
+    ) -> Result<reqwest::Request> {
+        use crate::netdisk::share_expire::{build_mexpire_form, mexpire_query};
+
+        let form = build_mexpire_form(share_id, days, now)?;
+        self.client
+            .post("https://pan.baidu.com/share/mexpire")
+            .query(&mexpire_query())
+            .header("Cookie", self.bduss_cookie_header())
+            .header("User-Agent", &self.web_user_agent)
+            .header("Referer", "https://pan.baidu.com/disk/home")
+            .form(&form)
+            .build()
+            .context("构造修改分享有效期请求失败")
+    }
+
+    /// 修改分享有效期（与网页端「我的分享」→ 有效期下拉一致）
+    ///
+    /// # 参数
+    /// * `share_id` - 分享ID
+    /// * `days` - 1 / 3 / 7 / 30，或 `-1` 表示永久有效（其它值直接报错，不发请求）
+    ///
+    /// # API
+    /// POST https://pan.baidu.com/share/mexpire?clienttype=0&app_id=250528&web=1
+    /// 参数: share_id=123, expire_time=<now+86400*days 或 -1>, op_expire_days=<days 或 -1>
+    ///
+    /// 鉴权方式与 `share_cancel` / `share_list` 相同（BDUSS/STOKEN Cookie，无 bdstoken）。
+    pub async fn share_mexpire(
+        &self,
+        share_id: u64,
+        days: i32,
+    ) -> Result<crate::netdisk::ShareMexpireResponse> {
+        let request =
+            self.build_share_mexpire_request(share_id, days, chrono::Utc::now().timestamp())?;
+        info!("修改分享有效期: share_id={}, days={}", share_id, days);
+
+        let response = self
+            .client
+            .execute(request)
+            .await
+            .context("修改分享有效期请求失败")?;
+
+        let status = response.status();
+        let response_text = response
+            .text()
+            .await
+            .context("读取修改分享有效期响应失败")?;
+
+        info!(
+            "修改分享有效期响应: status={}, body={}",
+            status, response_text
+        );
+
+        let mexpire_response: crate::netdisk::ShareMexpireResponse =
+            serde_json::from_str(&response_text)
+                .with_context(|| format!("解析修改分享有效期响应失败（HTTP {}）", status))?;
+
+        if !mexpire_response.is_success() {
+            warn!(
+                "修改分享有效期失败: share_id={}, {}",
+                share_id,
+                mexpire_response.error_reason()
+            );
+        }
+
+        Ok(mexpire_response)
+    }
+
     /// 获取分享列表
     ///
     /// # 参数
@@ -4836,6 +4909,40 @@ mod tests {
         let ua = NetdiskClient::default_mobile_user_agent();
         assert!(ua.contains("netdisk"));
         assert!(ua.contains("android"));
+    }
+
+    #[test]
+    fn test_share_mexpire_request_matches_web() {
+        let client = NetdiskClient::new(create_test_user_auth()).unwrap();
+        let req = client
+            .build_share_mexpire_request(41865092248, 3, 1_793_604_566)
+            .unwrap();
+        assert_eq!(req.method(), reqwest::Method::POST);
+        assert_eq!(
+            req.url().as_str(),
+            "https://pan.baidu.com/share/mexpire?clienttype=0&app_id=250528&web=1"
+        );
+        let h = req.headers();
+        assert_eq!(h["Cookie"], "BDUSS=test_bduss");
+        assert_eq!(h["Referer"], "https://pan.baidu.com/disk/home");
+        assert_eq!(h["Content-Type"], "application/x-www-form-urlencoded");
+        let body = std::str::from_utf8(req.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(
+            body,
+            format!(
+                "share_id=41865092248&expire_time={}&op_expire_days=3",
+                1_793_604_566 + 3 * 86_400
+            )
+        );
+
+        let req = client
+            .build_share_mexpire_request(7, -1, 1_793_604_566)
+            .unwrap();
+        let body = std::str::from_utf8(req.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(body, "share_id=7&expire_time=-1&op_expire_days=-1");
+
+        // 网页端没有的选项：不构造请求
+        assert!(client.build_share_mexpire_request(7, 14, 0).is_err());
     }
 
     #[test]
