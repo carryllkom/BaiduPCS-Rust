@@ -1542,6 +1542,9 @@ impl DownloadEngine {
     )> {
         let (fs_id, remote_path, local_path, total_size, owner_uid) = {
             let t = task.lock().await;
+            if cancellation_token.is_cancelled() || t.deletion_token.is_cancelled() {
+                anyhow::bail!("任务已被取消");
+            }
             (
                 t.fs_id,
                 t.remote_path.clone(),
@@ -1777,6 +1780,9 @@ impl DownloadEngine {
         // 9. 标记为下载中
         {
             let mut t = task.lock().await;
+            if cancellation_token.is_cancelled() || t.deletion_token.is_cancelled() {
+                anyhow::bail!("任务已被取消");
+            }
             t.mark_downloading();
         }
 

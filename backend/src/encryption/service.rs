@@ -314,6 +314,30 @@ impl EncryptionService {
     where
         F: Fn(u64, u64),
     {
+        self.decrypt_file_with_progress_cancellable(
+            input_path,
+            output_path,
+            progress_callback,
+            || false,
+        )
+    }
+
+    /// Cooperative cancellation at encrypted-chunk boundaries. The caller must
+    /// still join the blocking worker before removing its output file.
+    pub fn decrypt_file_with_progress_cancellable<F, C>(
+        &self,
+        input_path: &Path,
+        output_path: &Path,
+        progress_callback: F,
+        is_cancelled: C,
+    ) -> Result<u64>
+    where
+        F: Fn(u64, u64),
+        C: Fn() -> bool,
+    {
+        if is_cancelled() {
+            return Err(anyhow!("Decryption cancelled"));
+        }
         let mut input_file = BufReader::new(std::fs::File::open(input_path)?);
 
         // 读取魔数
@@ -324,18 +348,25 @@ impl EncryptionService {
             return Err(anyhow!("Invalid encrypted file format"));
         }
 
-        self.decrypt_file_chunked_with_progress(input_file, output_path, progress_callback)
+        self.decrypt_file_chunked_with_progress(
+            input_file,
+            output_path,
+            progress_callback,
+            is_cancelled,
+        )
     }
 
     /// 解密分块加密文件（带进度回调）
-    fn decrypt_file_chunked_with_progress<R: Read, F>(
+    fn decrypt_file_chunked_with_progress<R: Read, F, C>(
         &self,
         mut reader: R,
         output_path: &Path,
         progress_callback: F,
+        is_cancelled: C,
     ) -> Result<u64>
     where
         F: Fn(u64, u64),
+        C: Fn() -> bool,
     {
         // 读取算法
         let mut algo = [0u8; 1];
@@ -355,6 +386,9 @@ impl EncryptionService {
         reader.read_exact(&mut chunk_count_bytes)?;
         let total_chunks = u32::from_le_bytes(chunk_count_bytes);
 
+        if is_cancelled() {
+            return Err(anyhow!("Decryption cancelled"));
+        }
         let mut output_file = BufWriter::new(std::fs::File::create(output_path)?);
         let cipher = Aes256Gcm::new_from_slice(&self.master_key)
             .map_err(|e| anyhow!("Failed to create cipher: {}", e))?;
@@ -366,6 +400,9 @@ impl EncryptionService {
 
         // 分块解密
         for chunk_index in 0..total_chunks {
+            if is_cancelled() {
+                return Err(anyhow!("Decryption cancelled"));
+            }
             // 读取块 Nonce
             let mut chunk_nonce = [0u8; 12];
             reader.read_exact(&mut chunk_nonce)?;
@@ -392,6 +429,9 @@ impl EncryptionService {
             progress_callback(processed_bytes, original_size);
         }
 
+        if is_cancelled() {
+            return Err(anyhow!("Decryption cancelled"));
+        }
         output_file.flush()?;
 
         Ok(original_size)
@@ -1595,6 +1635,42 @@ mod tests {
         assert_eq!(metadata.original_size, test_data.len() as u64);
         // 统一使用 v1 格式
         assert_eq!(metadata.version, 1);
+    }
+
+    #[test]
+    fn test_issue192_decryption_stops_at_chunk_boundary() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("plain");
+        let encrypted = dir.path().join("encrypted");
+        let output = dir.path().join("output");
+        let data = vec![42; 20 * 1024 * 1024];
+        std::fs::write(&input, &data).unwrap();
+        let service = EncryptionService::new(
+            EncryptionService::generate_master_key(),
+            EncryptionAlgorithm::Aes256Gcm,
+        );
+        service.encrypt_file_chunked(&input, &encrypted).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let result = service.decrypt_file_with_progress_cancellable(
+            &encrypted,
+            &output,
+            |processed, total| {
+                if processed > 0 {
+                    assert!(processed < total, "must stop before the second chunk");
+                    cancelled.store(true, Ordering::SeqCst);
+                }
+            },
+            || cancelled.load(Ordering::SeqCst),
+        );
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(std::fs::metadata(&output).unwrap().len() < data.len() as u64);
+        // Pre-cancelled calls must not create/truncate their destination.
+        std::fs::write(&output, b"untouched").unwrap();
+        assert!(service
+            .decrypt_file_with_progress_cancellable(&encrypted, &output, |_, _| {}, || true)
+            .is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), b"untouched");
     }
 
     #[test]
